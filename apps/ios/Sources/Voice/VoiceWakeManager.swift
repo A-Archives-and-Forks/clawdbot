@@ -45,7 +45,7 @@ private enum VoiceWakeAudioError: LocalizedError {
     }
 }
 
-private enum VoiceWakeSuppressionReason: Hashable {
+enum VoiceWakeSuppressionReason: Hashable {
     case auxiliaryAudio
     case background
     case talk
@@ -75,7 +75,7 @@ final class VoiceWakeManager: NSObject {
     private var isStarting: Bool = false
     private var audioSessionIsActive = false
 
-    private var lastDispatched: String?
+    private var lastDispatched: (generation: UInt64, command: String)?
     private var onCommand: (@MainActor @Sendable (String) async throws -> Void)?
     private var userDefaultsObserver: NSObjectProtocol?
     private var suppressionReasons: Set<VoiceWakeSuppressionReason> = []
@@ -135,27 +135,7 @@ final class VoiceWakeManager: NSObject {
         }
     }
 
-    func setSuppressedByTalk(_ suppressed: Bool) {
-        self.setSuppressed(suppressed, reason: .talk)
-    }
-
-    func setSuppressedForBackground(_ suppressed: Bool) {
-        self.setSuppressed(suppressed, reason: .background)
-    }
-
-    func setSuppressedForAuxiliaryAudio(_ suppressed: Bool) {
-        self.setSuppressed(suppressed, reason: .auxiliaryAudio)
-    }
-
-    func setSuppressedByPushToTalk(_ suppressed: Bool) {
-        self.setSuppressed(suppressed, reason: .pushToTalk)
-    }
-
-    func setSuppressedByVoiceNote(_ suppressed: Bool) {
-        self.setSuppressed(suppressed, reason: .voiceNote)
-    }
-
-    private func setSuppressed(_ suppressed: Bool, reason: VoiceWakeSuppressionReason) {
+    func setSuppressed(_ suppressed: Bool, reason: VoiceWakeSuppressionReason) {
         if suppressed {
             self.suppressionReasons.insert(reason)
         } else {
@@ -407,8 +387,9 @@ final class VoiceWakeManager: NSObject {
             from: transcript, segments: segments, triggers: self.activeTriggerWords)
         else { return }
 
-        if cmd == self.lastDispatched { return }
-        self.lastDispatched = cmd
+        if self.lastDispatched?.generation == recognitionGeneration,
+           self.lastDispatched?.command == cmd { return }
+        self.lastDispatched = (recognitionGeneration, cmd)
         self.lastTriggeredCommand = cmd
         self.statusText = String(localized: "Triggered")
 

@@ -624,7 +624,7 @@ describe("worker turn launcher local placement", () => {
         if (placement?.state !== "active") {
           throw new Error("expected an active placement");
         }
-        placements.startDrain({
+        await placements.startDrain({
           sessionId: SESSION_ID,
           environmentId: placement.environmentId,
           ownerEpoch: placement.activeOwnerEpoch,
@@ -718,7 +718,7 @@ describe("worker turn launcher local placement", () => {
         if (placement?.state !== "failed" || placement.turnClaim !== null) {
           throw new Error("expected terminal placement before teardown recovery");
         }
-        expect(placements.listPendingWorkspaceResults()).toEqual([]);
+        expect(await placements.listPendingWorkspaceResultsAsync()).toEqual([]);
       });
       const provider = createWorkerSessionTurnPlacementProvider({
         environments,
@@ -759,7 +759,7 @@ describe("worker turn launcher local placement", () => {
         turnClaim: null,
         terminalReason: expect.stringContaining(expectedTerminalReason),
       });
-      expect(placements.listPendingWorkspaceResults()).toEqual([]);
+      expect(await placements.listPendingWorkspaceResultsAsync()).toEqual([]);
     },
   );
 
@@ -788,7 +788,7 @@ describe("worker turn launcher local placement", () => {
           if (request.source.kind !== "local") {
             throw new Error("expected a local workspace source");
           }
-          request.source.journal.commit(MANIFEST_REF);
+          await request.source.journal.commit(MANIFEST_REF);
           return {
             manifestRef: MANIFEST_REF,
             changed: false,
@@ -863,7 +863,7 @@ describe("worker turn launcher local placement", () => {
         turnClaim: null,
         terminalReason: null,
       });
-      expect(placements.listPendingWorkspaceResults()).toEqual([]);
+      expect(await placements.listPendingWorkspaceResultsAsync()).toEqual([]);
       expect(reconcileWorkspace).not.toHaveBeenCalled();
       expect(reconcileActivePlacement).not.toHaveBeenCalled();
 

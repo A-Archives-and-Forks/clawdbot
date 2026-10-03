@@ -71,18 +71,9 @@ export class PaletteSessionDraft implements ReactiveController {
       () => host.requestUpdate(),
     );
     this.subscriptions = new SubscriptionsController(host)
-      .watch(
-        () => this.draft && this.read().context?.agents,
-        (agents, notify) => agents.subscribe(notify),
-      )
-      .watch(
-        () => this.draft && this.read().context?.agentIdentity,
-        (identity, notify) => identity.subscribe(notify),
-      )
-      .watch(
-        () => this.draft && this.read().context?.sessions,
-        (sessions, notify) => sessions.subscribe(notify),
-      )
+      .watchStore(() => this.draft && this.read().context?.agents)
+      .watchStore(() => this.draft && this.read().context?.agentIdentity)
+      .watchStore(() => this.draft && this.read().context?.sessions)
       .watch(
         () => this.draft && this.read().context?.config,
         (config, notify) => config.subscribe(() => notify()),
@@ -154,7 +145,7 @@ export class PaletteSessionDraft implements ReactiveController {
     if (!attachmentDraft) {
       return undefined;
     }
-    const readSignal = attachmentDraft.readSignal;
+    const readSignal = attachmentDraft.reads.readSignal;
     return {
       uploadConfig: this.read().context?.config,
       attachments: attachmentDraft.attachments,
@@ -165,7 +156,7 @@ export class PaletteSessionDraft implements ReactiveController {
       disabled: this.messageLocked,
       getAttachments: () => attachmentDraft.attachments,
       readSignal,
-      onPendingReadsChange: (delta) => attachmentDraft.updatePending(readSignal, delta),
+      onPendingReadsChange: (delta) => attachmentDraft.reads.updatePending(readSignal, delta),
       onAttachmentsChange: (attachments) => {
         if (
           readSignal.aborted ||
@@ -230,7 +221,6 @@ export class PaletteSessionDraft implements ReactiveController {
       agentId,
       requestedAgentId: agentId,
       catalogId: "",
-      model: "",
       catalogLabel: "",
       startTerminal: false,
     };
@@ -284,7 +274,7 @@ export class PaletteSessionDraft implements ReactiveController {
     ) {
       submission.attachmentDraft.reset({ release: true });
     } else {
-      submission?.attachmentDraft.abortReads();
+      submission?.attachmentDraft.reads.abortReads();
     }
     this.settings.close();
     this.draft?.browser.close();
@@ -338,7 +328,7 @@ export class PaletteSessionDraft implements ReactiveController {
     const attachmentDraft = draft.submission.attachmentDraft;
     if (
       this.coldSubmitReadSignal &&
-      (this.coldSubmitReadSignal.aborted || attachmentDraft.pendingReads === 0)
+      (this.coldSubmitReadSignal.aborted || attachmentDraft.reads.pendingReads === 0)
     ) {
       const ready =
         !this.coldSubmitReadSignal.aborted &&

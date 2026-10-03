@@ -1,4 +1,12 @@
-import type { Api, AssistantMessage, Context, Model } from "@openclaw/llm-core";
+import {
+  hasRuntimeContextMarker,
+  isRuntimeContextMessage,
+  runtimeContextContentToText,
+  type Api,
+  type AssistantMessage,
+  type Context,
+  type Model,
+} from "@openclaw/llm-core";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import type {
   ResponseFunctionCallOutputItemList,
@@ -40,6 +48,12 @@ import {
   sanitizeNonEmptyTransportPayloadText,
   sanitizeTransportPayloadText,
 } from "./transport-stream-shared.js";
+
+function resolveResponsesInstructionRole(model: Model): "developer" | "system" {
+  const supportsDeveloperRole =
+    !isRecord(model.compat) || model.compat.supportsDeveloperRole !== false;
+  return model.reasoning && supportsDeveloperRole ? "developer" : "system";
+}
 
 export function stripEncryptedReasoningContentFields(value: unknown): {
   value: unknown;
@@ -291,10 +305,7 @@ function convertResponsesMessagesWithStyle(
     const normalized = sanitized.length > 64 ? sanitized.slice(0, 64) : sanitized;
     return normalized.replace(/_+$/, "");
   };
-  const buildForeignResponsesItemId = (itemId: string) => {
-    const normalized = `fc_${shortHash(itemId)}`;
-    return normalized.length > 64 ? normalized.slice(0, 64) : normalized;
-  };
+  const buildForeignResponsesItemId = (itemId: string) => `fc_${shortHash(itemId)}`;
   const buildSameProviderCopilotResponsesItemId = (itemId: string) => {
     const sanitized = sanitizeIdPart(itemId);
     const candidate = sanitized.startsWith("fc_") ? sanitized : `fc_${sanitized}`;
@@ -305,10 +316,7 @@ function convertResponsesMessagesWithStyle(
     _targetModel: Model,
     source: { provider: string; api: Api },
   ) => {
-    if (!allowedToolCallProviders.has(model.provider)) {
-      return normalizeIdPart(id);
-    }
-    if (!id.includes("|")) {
+    if (!allowedToolCallProviders.has(model.provider) || !id.includes("|")) {
       return normalizeIdPart(id);
     }
     const separatorIndex = id.indexOf("|");
@@ -348,21 +356,12 @@ function convertResponsesMessagesWithStyle(
   const includeSystemPrompt = options?.includeSystemPrompt ?? true;
   if (includeSystemPrompt && context.systemPrompt) {
     messages.push(
-      buildResponsesInputMessage(
-        model.reasoning &&
-          (model.compat as { supportsDeveloperRole?: boolean } | undefined)
-            ?.supportsDeveloperRole !== false
-          ? "developer"
-          : "system",
-        [
-          {
-            type: "input_text",
-            text: sanitizeTransportPayloadText(
-              stripSystemPromptCacheBoundary(context.systemPrompt),
-            ),
-          },
-        ],
-      ),
+      buildResponsesInputMessage(resolveResponsesInstructionRole(model), [
+        {
+          type: "input_text",
+          text: sanitizeTransportPayloadText(stripSystemPromptCacheBoundary(context.systemPrompt)),
+        },
+      ]),
     );
   }
   // The compact endpoint's output is already canonical provider input, not
@@ -377,7 +376,7 @@ function convertResponsesMessagesWithStyle(
   // Each carrier stays with its preceding user/checkpoint; moving it past an
   // appended steering user would rewrite the already admitted request prefix.
   const isCarrier = (message: (typeof replayMessages)[number]) =>
-    "role" in message && message.role === "user" && message.runtimeContextCarrier === true;
+    "role" in message && hasRuntimeContextMarker(message);
   if (replayMessages.some(isCarrier)) {
     const anchored: typeof replayMessages = [];
     // A canonical window is already emitted above; its checkpoint anchors an otherwise userless tail.
@@ -404,7 +403,16 @@ function convertResponsesMessagesWithStyle(
       messages.push(msg);
       continue;
     }
-    if (msg.role === "user") {
+    if (isRuntimeContextMessage(msg)) {
+      messages.push(
+        buildResponsesInputMessage(resolveResponsesInstructionRole(model), [
+          {
+            type: "input_text",
+            text: sanitizeTransportPayloadText(runtimeContextContentToText(msg.content)),
+          },
+        ]),
+      );
+    } else if (msg.role === "user") {
       if (typeof msg.content === "string") {
         messages.push(
           buildResponsesInputMessage(

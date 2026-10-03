@@ -1,6 +1,6 @@
 import type { KeyId } from "@earendil-works/pi-tui";
-import { coerceErrorMessage } from "@openclaw/normalization-core/error-coercion";
 import type { ImageContent, Model } from "../../../llm/types.js";
+import { registerListener } from "../../../shared/listeners.js";
 import { interactiveAgentTheme as theme } from "../../modes/interactive/theme/theme.js";
 import type { AgentMessage } from "../../runtime/index.js";
 import { isToolResultError } from "../../tool-result-error.js";
@@ -10,7 +10,11 @@ import type { ModelRegistry } from "../model-registry.js";
 import type { SessionManager } from "../session-manager.js";
 import type { BuildSystemPromptOptions } from "../system-prompt.js";
 import { reportExtensionHandlerError } from "./handler-error.js";
-import { bindExtensionMetadataActions } from "./metadata-actions.js";
+import {
+  bindExtensionMetadataActions,
+  bindExtensionPersistenceActions,
+} from "./metadata-actions.js";
+import { bindExtensionProviderActions } from "./provider-actions.js";
 import type {
   BeforeAgentStartEvent,
   BeforeAgentStartEventResult,
@@ -21,6 +25,7 @@ import type {
   ContextUsage,
   Extension,
   ExtensionActions,
+  ExtensionActionsV2,
   ExtensionCommandContext,
   ExtensionCommandContextActions,
   ExtensionContext,
@@ -81,7 +86,7 @@ const RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = [
 type BuiltInKeyBindings = Partial<Record<KeyId, { keybinding: string; restrictOverride: boolean }>>;
 
 const buildBuiltinKeybindings = (resolvedKeybindings: KeybindingsConfig): BuiltInKeyBindings => {
-  const builtinKeybindings = {} as BuiltInKeyBindings;
+  const builtinKeybindings: BuiltInKeyBindings = {};
   for (const [keybinding, keys] of Object.entries(resolvedKeybindings)) {
     if (keys === undefined) {
       continue;
@@ -254,6 +259,16 @@ export class ExtensionRunner {
     this.uiContext = noOpUIContext;
   }
 
+  /** Bind host actions with worker-backed persistence; legacy bindCore remains source-compatible. */
+  bindCoreAsync(
+    actions: ExtensionActionsV2,
+    contextActions: ExtensionContextActions,
+    providerActions?: Parameters<ExtensionRunner["bindCore"]>[2],
+  ): void {
+    this.bindCore(actions, contextActions, providerActions);
+    bindExtensionPersistenceActions(this.sessionManager, this.runtime, actions);
+  }
+
   bindCore(
     actions: ExtensionActions,
     contextActions: ExtensionContextActions,
@@ -287,41 +302,12 @@ export class ExtensionRunner {
     this.compactFn = contextActions.compact;
     this.getSystemPromptFn = contextActions.getSystemPrompt;
 
-    // Flush provider registrations queued during extension loading
-    for (const { name, config, extensionPath } of this.runtime.pendingProviderRegistrations) {
-      try {
-        if (providerActions?.registerProvider) {
-          providerActions.registerProvider(name, config);
-        } else {
-          this.modelRegistry.registerProvider(name, config);
-        }
-      } catch (err) {
-        this.emitError({
-          extensionPath,
-          event: "register_provider",
-          error: coerceErrorMessage(err),
-          stack: err instanceof Error ? err.stack : undefined,
-        });
-      }
-    }
-    this.runtime.pendingProviderRegistrations = [];
-
-    // From this point on, provider registration/unregistration takes effect immediately
-    // without requiring a /reload.
-    this.runtime.registerProvider = (name, config) => {
-      if (providerActions?.registerProvider) {
-        providerActions.registerProvider(name, config);
-        return;
-      }
-      this.modelRegistry.registerProvider(name, config);
-    };
-    this.runtime.unregisterProvider = (name) => {
-      if (providerActions?.unregisterProvider) {
-        providerActions.unregisterProvider(name);
-        return;
-      }
-      this.modelRegistry.unregisterProvider(name);
-    };
+    bindExtensionProviderActions(
+      this.runtime,
+      this.modelRegistry,
+      (error) => this.emitError(error),
+      providerActions,
+    );
   }
 
   bindCommandContext(actions?: ExtensionCommandContextActions): void {
@@ -470,8 +456,7 @@ export class ExtensionRunner {
   }
 
   onError(listener: ExtensionErrorListener): () => void {
-    this.errorListeners.add(listener);
-    return () => this.errorListeners.delete(listener);
+    return registerListener(this.errorListeners, listener);
   }
 
   emitError(error: ExtensionError): void {
@@ -722,12 +707,7 @@ export class ExtensionRunner {
     let result: ToolCallEventResult | undefined;
 
     for (const ext of this.extensions) {
-      const handlers = ext.handlers.get("tool_call");
-      if (!handlers || handlers.length === 0) {
-        continue;
-      }
-
-      for (const handler of handlers) {
+      for (const handler of ext.handlers.get("tool_call") ?? []) {
         ctx ??= this.createContext();
         const handlerResult = await handler(event, ctx);
 

@@ -48,6 +48,7 @@ import { renderSidebarReorderMenu } from "./sidebar-reorder.ts";
 export type AppSidebarRenderHost = AppSidebarSessionNavigationElement & {
   activePluginTabId: string;
   teamOnlineExpanded: boolean;
+  readonly people: import("./sidebar-people-controller.ts").SidebarPeopleController;
   getRouteSessionKey(): string;
   renderPinnedSidebarSession(session: SidebarRecentSession): unknown;
   toggleSection(sectionId: string): void;
@@ -72,11 +73,14 @@ function renderSidebarAgentCard(host: AppSidebarRenderHost) {
     agents: cardAgents,
     identity: cardIdentity,
   } = host.activeChipAgent();
+  if (!cardAgent) {
+    return renderSidebarWorkspaceHeader(host);
+  }
   const menuUnread = cardAgents.some((entry) => {
     const agentId = normalizeAgentId(entry.id);
     return agentId !== cardAgentId && host.agentUnreadCount(agentId) > 0;
   });
-  const cardName = normalizeAgentLabel(cardAgent ?? { id: cardAgentId }, cardIdentity);
+  const cardName = normalizeAgentLabel(cardAgent, cardIdentity);
   const gateway = host.sessionDataContext?.gateway;
   const avatarAuthReady = Boolean(
     gateway &&
@@ -88,11 +92,9 @@ function renderSidebarAgentCard(host: AppSidebarRenderHost) {
     <openclaw-sidebar-agent-card
       .agentName=${cardName}
       .agentId=${cardAgentId}
-      .avatarUrl=${
-        cardAgent ? resolveAgentAvatarUrl(cardAgent, cardIdentity) : cardIdentity?.avatar
-      }
+      .avatarUrl=${resolveAgentAvatarUrl(cardAgent, cardIdentity)}
       .avatarAuthReady=${avatarAuthReady}
-      .avatarText=${resolveAgentTextAvatar(cardAgent ?? { identity: {} }, cardIdentity)}
+      .avatarText=${resolveAgentTextAvatar(cardAgent, cardIdentity)}
       .environment=${host.sessionDataContext?.config?.current?.environment ?? null}
       .menuOpen=${host.sidebarMenus.agentMenuPosition !== null}
       .menuUnread=${menuUnread}
@@ -391,16 +393,12 @@ export function renderAppSidebarFooterBar(host: AppSidebarRenderHost) {
                   lastError: host.lastError,
                   announce: false,
                 })
-              : html`
-                  ${
-                    gateway
-                      ? html`<span class="sidebar-identity-card__gateway" aria-hidden="true">
-                          <span class="sidebar-gateway-name">${gateway.name}</span>
-                          ${gatewayPrimaryTag ? html`<span class="sidebar-gateway-primary">${gatewayPrimaryTag}</span>` : nothing}
-                        </span>`
-                      : nothing
-                  }
-                `
+              : gateway
+                ? html`<span class="sidebar-identity-card__gateway" aria-hidden="true">
+                    <span class="sidebar-gateway-name">${gateway.name}</span>
+                    ${gatewayPrimaryTag ? html`<span class="sidebar-gateway-primary">${gatewayPrimaryTag}</span>` : nothing}
+                  </span>`
+                : nothing
           }
         </span>
       </button>

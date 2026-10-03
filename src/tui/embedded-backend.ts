@@ -16,7 +16,6 @@ import {
 } from "../agents/agent-run-terminal-outcome.js";
 import {
   resolveAgentDir,
-  resolveAgentWorkspaceDir,
   resolveDefaultAgentId,
   resolveSessionAgentId,
 } from "../agents/agent-scope.js";
@@ -35,7 +34,6 @@ import {
   withPreparedModelCatalogOwner,
 } from "../agents/prepared-model-catalog.js";
 import { getPreparedModelRuntimeAuthMaterializations } from "../agents/prepared-model-runtime-auth.js";
-import { loadAgentRuntimePluginRegistryHandle } from "../agents/runtime-plugins.js";
 import {
   getSubagentSessionListReadSnapshotIdentity,
   prepareOptionalSubagentSessionListReadCache,
@@ -43,6 +41,7 @@ import {
 import { readToolValidationErrorSummary } from "../agents/tool-error-summary.js";
 import { bindEmbeddedSessionRowProjection } from "../agents/tools/embedded-gateway-stub.js";
 import { resolveTextCommand } from "../auto-reply/commands-registry.js";
+import { isAbortRequestText } from "../auto-reply/reply/abort-primitives.js";
 import { executeSessionGoalCommand, parseGoalCommand } from "../auto-reply/reply/commands-goal.js";
 import { resolveQueueSettingsCore } from "../auto-reply/reply/queue/settings.js";
 import {
@@ -55,12 +54,10 @@ import { createDefaultDeps } from "../cli/deps.js";
 import { getRuntimeConfig, registerConfigWriteListener } from "../config/config.js";
 import type { SessionEntry } from "../config/sessions.js";
 import { applySessionPatchProjection } from "../config/sessions/session-accessor.js";
-import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   mergeAssistantText,
   resolveAssistantTextInput,
 } from "../gateway/agent-event-assistant-text.js";
-import { isChatStopCommandText } from "../gateway/chat-abort.js";
 import { resolveEffectiveChatHistoryMaxChars } from "../gateway/chat-display-projection.js";
 import {
   capLiveAssistantText,
@@ -68,15 +65,13 @@ import {
 } from "../gateway/live-chat-projector.js";
 import { getMaxChatHistoryMessagesBytes } from "../gateway/server-constants.js";
 import {
+  CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES,
   createChatHistoryActivityProjection,
   createChatHistoryByteCounter,
+  replaceOversizedChatHistoryMessages,
 } from "../gateway/server-methods/chat-history-budget.js";
 import { enrichChatHistoryCompactionMarkers } from "../gateway/server-methods/chat-history-page-kernel.js";
 import { readChatHistoryPage } from "../gateway/server-methods/chat-history-pages.js";
-import {
-  CHAT_HISTORY_MAX_SINGLE_MESSAGE_BYTES,
-  replaceOversizedChatHistoryMessages,
-} from "../gateway/server-methods/chat.js";
 import { buildModelsListResult } from "../gateway/server-methods/models-list-result.js";
 import { createGatewaySession } from "../gateway/session-create-service.js";
 import { performGatewaySessionReset } from "../gateway/session-reset-service.js";
@@ -129,6 +124,7 @@ import {
   resolveDeltaPayload,
   resolveTerminalChatState,
 } from "./embedded-chat-projection.js";
+import { ensureEmbeddedHistoryRuntimePluginsLoaded } from "./embedded-history-runtime.js";
 import {
   buildLocalQueuedPrompt,
   timeoutSecondsFromMs,
@@ -174,22 +170,6 @@ const embeddedSessionStartupMigrationLog = {
   info: (message: string) => logInfo(message, silentRuntime),
   warn: (message: string) => logWarn(message, silentRuntime),
 };
-
-function ensureEmbeddedHistoryRuntimePluginsLoaded(params: {
-  cfg: OpenClawConfig;
-  sessionAgentId: string;
-}): { status: "warmed" } | { status: "failed"; error: string } {
-  try {
-    const workspaceDir = resolveAgentWorkspaceDir(params.cfg, params.sessionAgentId);
-    loadAgentRuntimePluginRegistryHandle({
-      config: params.cfg,
-      workspaceDir,
-    });
-    return { status: "warmed" };
-  } catch (err) {
-    return { status: "failed", error: formatTuiErrorMessage(err) };
-  }
-}
 
 export class EmbeddedTuiBackend implements TuiBackend {
   readonly connection = { url: "local embedded" };
@@ -246,10 +226,6 @@ export class EmbeddedTuiBackend implements TuiBackend {
       this.emit(event.event, event.payload);
     });
     const config = getRuntimeConfig();
-    this.unsubscribeConfigWrites = registerConfigWriteListener((event) => {
-      this.preparedModelRuntime.publish(event.runtimeConfig);
-    });
-    this.preparedModelRuntime.publish(config);
     // Local mode shares the Gateway's session-store readiness checks.
     this.sessionProjection = (async () => {
       const { runSessionStartupMigration } =
@@ -259,6 +235,11 @@ export class EmbeddedTuiBackend implements TuiBackend {
         env: process.env,
         log: embeddedSessionStartupMigrationLog,
       });
+      // Maintenance can retire auth read owners; publish only after it finishes.
+      this.unsubscribeConfigWrites = registerConfigWriteListener((event) => {
+        this.preparedModelRuntime.publish(event.runtimeConfig);
+      });
+      this.preparedModelRuntime.publish(getRuntimeConfig());
       return createSessionRowProjection({ cfg: getRuntimeConfig(), getConfig: getRuntimeConfig });
     })();
     this.ready = this.sessionProjection.then(() => {});
@@ -270,8 +251,6 @@ export class EmbeddedTuiBackend implements TuiBackend {
 
   async stop() {
     this.scheduler.beginClose();
-    this.unsubscribeConfigWrites?.();
-    this.unsubscribeConfigWrites = undefined;
     clearEmbeddedPluginApprovalBroker(this.pluginApprovalBroker);
     this.unsubscribePluginApprovals?.();
     this.unsubscribePluginApprovals = undefined;
@@ -305,6 +284,8 @@ export class EmbeddedTuiBackend implements TuiBackend {
     const projection = this.sessionProjection;
     this.sessionProjection = undefined;
     await projection?.catch(() => undefined).then((value) => value?.dispose());
+    this.unsubscribeConfigWrites?.();
+    this.unsubscribeConfigWrites = undefined;
     this.unsubscribe?.();
     this.unsubscribe = undefined;
     this.pendingLifecycleErrors.forEach(clearTimeout);
@@ -339,7 +320,7 @@ export class EmbeddedTuiBackend implements TuiBackend {
       agentId,
     };
     const abortableSessionRun = this.hasAbortableSessionRun(runScope);
-    const stopCommand = abortableSessionRun && isChatStopCommandText(opts.message);
+    const stopCommand = abortableSessionRun && isAbortRequestText(opts.message);
     const queuedAfter =
       question || stopCommand || isQueueCommand
         ? undefined
@@ -455,7 +436,8 @@ export class EmbeddedTuiBackend implements TuiBackend {
         continue;
       }
       if (opts.sessionKey === "global") {
-        const defaultAgentId = resolveDefaultAgentId(getRuntimeConfig());
+        const defaultAgentId =
+          opts.agentId && run.agentId ? undefined : resolveDefaultAgentId(getRuntimeConfig());
         const requestedAgentId = opts.agentId ? normalizeAgentId(opts.agentId) : defaultAgentId;
         const runAgentId = run.agentId ? normalizeAgentId(run.agentId) : defaultAgentId;
         if (runAgentId !== requestedAgentId) {

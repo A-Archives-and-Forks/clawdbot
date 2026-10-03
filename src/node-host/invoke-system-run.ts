@@ -1,17 +1,18 @@
 /** Policy and execution pipeline for approved node-host system.run requests. */
 import crypto from "node:crypto";
-import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
-import type { OpenClawConfig } from "../config/types.openclaw.js";
+import path from "node:path";
 import {
-  describeInterpreterInlineEval,
-  type InterpreterInlineEvalHit,
-} from "../infra/command-analysis/inline-eval.js";
+  normalizeLowercaseStringOrEmpty,
+  normalizeOptionalString,
+} from "@openclaw/normalization-core/string-coerce";
+import { sliceUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { describeInterpreterInlineEval } from "../infra/command-analysis/inline-eval.js";
 import { detectInlineEvalInSegments } from "../infra/command-analysis/risks.js";
 import { createDedupeCache } from "../infra/dedupe.js";
 import {
   analyzeArgvCommand,
   commitExecAuthorizationLocked,
-  commandRequiresSecurityAuditSuppressionApproval,
   createExecApprovalPolicySnapshot,
   hasDurableExecApproval,
   isExecApprovalPolicySnapshotCurrent,
@@ -21,19 +22,12 @@ import {
   resolveAllowAlwaysPersistenceDecision,
   resolveDurableExecApprovalRequirement,
   resolveExecApprovalsLocked,
-  type ExecAllowlistEntry,
   type ExecApprovalUsageAuthorization,
-  type ExecApprovalPolicySnapshot,
   type ExecApprovalsResolved,
   type ExecAsk,
-  type ExecCommandSegment,
-  type ExecSegmentSatisfiedBy,
   type ExecSecurity,
 } from "../infra/exec-approvals.js";
-import {
-  planExecAuthorization,
-  type ExecAuthorizationPlan,
-} from "../infra/exec-authorization-plan.js";
+import { planExecAuthorization } from "../infra/exec-authorization-plan.js";
 import { resolveUnpinnedAutoApprovalEligibility } from "../infra/exec-auto-approval-eligibility.js";
 import {
   EXEC_AUTO_REVIEW_DENIAL_GUIDANCE,
@@ -42,7 +36,11 @@ import {
   resolveExecAutoReviewDecision,
   type ExecAutoReviewer,
 } from "../infra/exec-auto-review.js";
-import type { ExecHostRequest, ExecHostResponse, ExecHostRunResult } from "../infra/exec-host.js";
+import {
+  requestExecHostViaSocket,
+  type ExecHostRequest,
+  type ExecHostRunResult,
+} from "../infra/exec-host.js";
 import { resolveExecSafeBinRuntimePolicy } from "../infra/exec-safe-bin-runtime-policy.js";
 import {
   extractEnvAssignmentKeysFromDispatchWrappers,
@@ -53,6 +51,7 @@ import {
 } from "../infra/exec-wrapper-resolution.js";
 import {
   inspectHostExecEnvOverrides,
+  sanitizeHostExecEnv,
   sanitizeSystemRunEnvOverrides,
 } from "../infra/host-env-security.js";
 import {
@@ -66,18 +65,17 @@ import { normalizeSystemRunApprovalPlan } from "../infra/system-run-approval-pla
 import { formatExecCommand, resolveSystemRunCommandRequest } from "../infra/system-run-command.js";
 import {
   APPROVAL_CWD_DRIFT_DENIED_MESSAGE,
-  type ApprovedCwdSnapshot,
   captureApprovedCwdSnapshotSync,
   revalidateApprovedCwdSnapshot,
 } from "../infra/system-run-cwd-binding.js";
 import { revalidateApprovedMutableFileOperand } from "../infra/system-run-file-snapshot.js";
 import { logWarn } from "../logger.js";
-import type { NodeHostClient } from "./client.js";
 import {
   evaluateSystemRunPolicy,
   resolveExecApprovalDecision,
   resolveNodeExecConfigPolicy,
 } from "./exec-policy.js";
+import type { runCommand } from "./invoke-run-command.js";
 import {
   applyOutputTruncation,
   evaluateSystemRunAllowlist,
@@ -90,12 +88,12 @@ import {
 } from "./invoke-system-run-plan.js";
 import type {
   ExecEventPayload,
-  ExecFinishedResult,
-  ExecFinishedEventParams,
   RunResult,
   SkillBinsProvider,
   SystemRunParams,
 } from "./invoke-types.js";
+
+const OUTPUT_EVENT_TAIL = 20_000;
 
 type SystemRunInvokeResult = {
   ok: boolean;
@@ -121,48 +119,8 @@ type SystemRunExecutionContext = {
   suppressNotifyOnExit: boolean;
 };
 
-type SystemRunParsePhase = {
-  argv: string[];
-  shellPayload: string | null;
-  shellWrapperInvocation: boolean;
-  commandText: string;
-  approvalPlan: import("../infra/exec-approvals.js").SystemRunApprovalPlan | null;
-  agentId: string | undefined;
-  sessionKey: string;
-  runId: string;
-  execution: SystemRunExecutionContext;
-  approvalDecision: ReturnType<typeof resolveExecApprovalDecision>;
-  approvalSource: "ask-fallback" | "auto-review" | undefined;
-  delayedApprovalPolicySnapshot: ExecApprovalPolicySnapshot | null;
-  envOverrides: Record<string, string> | undefined;
-  env: Record<string, string> | undefined;
-  cwd: string | undefined;
-  timeoutMs: number | undefined;
-  needsScreenRecording: boolean;
-  approved: boolean;
-};
-
-type SystemRunPolicyPhase = SystemRunParsePhase & {
-  approvals: ExecApprovalsResolved;
-  evaluationPolicySnapshot: ExecApprovalPolicySnapshot;
-  security: ExecSecurity;
-  ask: ExecAsk;
-  policy: ReturnType<typeof evaluateSystemRunPolicy>;
-  approvalGrantSource: "explicit-approval" | "auto-review" | null;
-  durableApprovalSatisfied: boolean;
-  durableApprovalRequirement: ReturnType<typeof resolveDurableExecApprovalRequirement>;
-  strictInlineEval: boolean;
-  inlineEvalHit: InterpreterInlineEvalHit | null;
-  allowlistMatches: ExecAllowlistEntry[];
-  allowlistAuthorizationSatisfied: boolean;
-  segments: ExecCommandSegment[];
-  segmentSatisfiedBy: ExecSegmentSatisfiedBy[];
-  authorizationPlan: ExecAuthorizationPlan | undefined;
-  plannedAllowlistArgv: string[] | undefined;
-  isWindows: boolean;
-  approvedCwdSnapshot: ApprovedCwdSnapshot | undefined;
-  executableBinding: SystemRunMutableFileBinding | undefined;
-};
+type SystemRunParsePhase = NonNullable<Awaited<ReturnType<typeof parseSystemRunPhase>>>;
+type SystemRunPolicyPhase = NonNullable<Awaited<ReturnType<typeof evaluateSystemRunPolicyPhase>>>;
 
 const safeBinTrustedDirWarningCache = createDedupeCache({
   ttlMs: 0,
@@ -209,8 +167,6 @@ function normalizeDeniedReason(reason: string | null | undefined): SystemRunDeni
 export async function resolveEffectiveSystemRunExecPolicy(params: {
   cfg: OpenClawConfig;
   agentId: string | undefined;
-  defaultSecurity: ExecSecurity;
-  defaultAsk: ExecAsk;
   requireSocket: boolean;
 }): Promise<EffectiveSystemRunExecPolicy> {
   const modePolicy = resolveNodeExecConfigPolicy(params);
@@ -249,33 +205,13 @@ async function resolveSystemRunAutoReviewer(params: {
 }
 
 type HandleSystemRunInvokeOptions = {
-  client: NodeHostClient;
   params: SystemRunParams;
   skillBins: SkillBinsProvider;
   signal?: AbortSignal;
-  execHostEnforced: boolean;
-  execHostFallbackAllowed: boolean;
-  resolveExecSecurity: (value?: string) => ExecSecurity;
-  resolveExecAsk: (value?: string) => ExecAsk;
-  isCmdExeInvocation: (argv: string[]) => boolean;
-  sanitizeEnv: (overrides?: Record<string, string> | null) => Record<string, string> | undefined;
-  runCommand: (
-    argv: string[],
-    cwd: string | undefined,
-    env: Record<string, string> | undefined,
-    timeoutMs: number | undefined,
-    signal?: AbortSignal,
-    assertCurrent?: () => void,
-  ) => Promise<RunResult>;
-  runViaMacAppExecHost: (params: {
-    approvals: ExecApprovalsResolved;
-    request: ExecHostRequest;
-    signal?: AbortSignal;
-  }) => Promise<ExecHostResponse | null>;
-  sendNodeEvent: (client: NodeHostClient, event: string, payload: unknown) => Promise<void>;
-  buildExecEventPayload: (payload: ExecEventPayload) => ExecEventPayload;
+  runCommand: typeof runCommand;
+  /** Agent runs omit node exec lifecycle events; their own stream owns completion. */
+  sendNodeEvent?: (event: string, payload: ExecEventPayload) => Promise<void>;
   sendInvokeResult: (result: SystemRunInvokeResult) => Promise<void>;
-  sendExecFinishedEvent: (params: ExecFinishedEventParams) => Promise<void>;
   preferMacAppExecHost: boolean;
   getRuntimeConfig?: () => OpenClawConfig;
   autoReviewer?: ExecAutoReviewer;
@@ -291,28 +227,21 @@ async function loadSystemRunConfig(opts: HandleSystemRunInvokeOptions): Promise<
 }
 
 async function sendSystemRunDenied(
-  opts: Pick<
-    HandleSystemRunInvokeOptions,
-    "client" | "sendNodeEvent" | "buildExecEventPayload" | "sendInvokeResult"
-  >,
+  opts: Pick<HandleSystemRunInvokeOptions, "sendNodeEvent" | "sendInvokeResult">,
   execution: SystemRunExecutionContext,
   params: {
     reason: SystemRunDeniedReason;
     message: string;
   },
 ) {
-  await opts.sendNodeEvent(
-    opts.client,
-    "exec.denied",
-    opts.buildExecEventPayload({
-      sessionKey: execution.sessionKey,
-      runId: execution.runId,
-      host: "node",
-      command: execution.commandText,
-      reason: params.reason,
-      suppressNotifyOnExit: execution.suppressNotifyOnExit,
-    }),
-  );
+  await opts.sendNodeEvent?.("exec.denied", {
+    sessionKey: execution.sessionKey,
+    runId: execution.runId,
+    host: "node",
+    command: execution.commandText,
+    reason: params.reason,
+    suppressNotifyOnExit: execution.suppressNotifyOnExit,
+  });
   await opts.sendInvokeResult({
     ok: false,
     // A missing companion reply can follow execution; it is not a policy denial.
@@ -324,18 +253,30 @@ async function sendSystemRunDenied(
 }
 
 async function sendSystemRunCompleted(
-  opts: Pick<HandleSystemRunInvokeOptions, "sendExecFinishedEvent" | "sendInvokeResult">,
+  opts: Pick<HandleSystemRunInvokeOptions, "sendNodeEvent" | "sendInvokeResult">,
   execution: SystemRunExecutionContext,
-  result: ExecFinishedResult,
+  result: ExecHostRunResult | RunResult,
   payloadJSON: string,
 ) {
-  await opts.sendExecFinishedEvent({
-    sessionKey: execution.sessionKey,
-    runId: execution.runId,
-    commandText: execution.commandText,
-    result,
-    suppressNotifyOnExit: execution.suppressNotifyOnExit,
-  });
+  if (opts.sendNodeEvent) {
+    const combined = [result.stdout, result.stderr, result.error].filter(Boolean).join("\n");
+    const trimmed = combined.trim();
+    await opts.sendNodeEvent("exec.finished", {
+      sessionKey: execution.sessionKey,
+      runId: execution.runId,
+      host: "node",
+      command: execution.commandText,
+      exitCode: result.exitCode ?? undefined,
+      timedOut: result.timedOut,
+      success: result.success,
+      output: !trimmed
+        ? combined
+        : trimmed.length <= OUTPUT_EVENT_TAIL
+          ? trimmed
+          : `... (truncated) ${sliceUtf16Safe(trimmed, trimmed.length - OUTPUT_EVENT_TAIL)}`,
+      suppressNotifyOnExit: execution.suppressNotifyOnExit,
+    });
+  }
   await opts.sendInvokeResult({
     ok: true,
     payloadJSON,
@@ -350,11 +291,7 @@ function argvArraysMatch(left: readonly string[] | undefined, right: readonly st
   );
 }
 
-export { buildSystemRunApprovalPlan } from "./invoke-system-run-plan.js";
-
-async function parseSystemRunPhase(
-  opts: HandleSystemRunInvokeOptions,
-): Promise<SystemRunParsePhase | null> {
+async function parseSystemRunPhase(opts: HandleSystemRunInvokeOptions) {
   const invalid = async (message: string) => {
     await opts.sendInvokeResult({ ok: false, error: { code: "INVALID_REQUEST", message } });
     return null;
@@ -456,6 +393,7 @@ async function parseSystemRunPhase(
     overrides: opts.params.env ?? undefined,
     shellWrapper: shellWrapperInvocation,
   });
+  const validatedApprovalSource: ExecHostRequest["approvalSource"] = approvalSource ?? undefined;
   return {
     argv: command.argv,
     shellPayload,
@@ -467,10 +405,10 @@ async function parseSystemRunPhase(
     runId,
     execution: { sessionKey, runId, commandText, suppressNotifyOnExit },
     approvalDecision,
-    approvalSource: approvalSource ?? undefined,
+    approvalSource: validatedApprovalSource,
     delayedApprovalPolicySnapshot,
     envOverrides,
-    env: opts.sanitizeEnv(envOverrides),
+    env: sanitizeHostExecEnv({ overrides: envOverrides, blockPathOverrides: true }),
     cwd,
     timeoutMs: opts.params.timeoutMs ?? undefined,
     needsScreenRecording: opts.params.needsScreenRecording === true,
@@ -481,13 +419,11 @@ async function parseSystemRunPhase(
 async function evaluateSystemRunPolicyPhase(
   opts: HandleSystemRunInvokeOptions,
   parsed: SystemRunParsePhase,
-): Promise<SystemRunPolicyPhase | null> {
+) {
   const cfg = await loadSystemRunConfig(opts);
   const effectivePolicy = await resolveEffectiveSystemRunExecPolicy({
     cfg,
     agentId: parsed.agentId,
-    defaultSecurity: opts.resolveExecSecurity(undefined),
-    defaultAsk: opts.resolveExecAsk(undefined),
     requireSocket: opts.preferMacAppExecHost,
   });
   const { agentExec, globalExec, approvals } = effectivePolicy;
@@ -552,7 +488,10 @@ async function evaluateSystemRunPolicyPhase(
   // derive the inner payload. That keeps `cmd.exe /c` approval-gated even when
   // dispatch carriers like `env FOO=bar ...` wrap the shell invocation.
   const cmdDetectionArgv = resolveShellWrapperTransportArgv(parsed.argv) ?? parsed.argv;
-  const cmdInvocation = opts.isCmdExeInvocation(cmdDetectionArgv);
+  const cmdBase = normalizeLowercaseStringOrEmpty(
+    path.win32.basename(cmdDetectionArgv[0]?.trim() ?? ""),
+  );
+  const cmdInvocation = cmdBase === "cmd.exe" || cmdBase === "cmd";
   const durableApprovalSatisfied = hasDurableExecApproval({
     analysisOk,
     segmentAllowlistEntries,
@@ -564,7 +503,7 @@ async function evaluateSystemRunPolicyPhase(
     segmentAllowlistEntries.some((entry) => entry?.source === "allow-always");
   const forwardedAutoReview = parsed.approvalSource === "auto-review";
   let approvalDecision = forwardedAutoReview ? "allow-once" : parsed.approvalDecision;
-  let approvalGrantSource: SystemRunPolicyPhase["approvalGrantSource"] = forwardedAutoReview
+  let approvalGrantSource: "explicit-approval" | "auto-review" | null = forwardedAutoReview
     ? "auto-review"
     : parsed.approved || approvalDecision !== null
       ? "explicit-approval"
@@ -583,29 +522,6 @@ async function evaluateSystemRunPolicyPhase(
     // Env sanitization uses broader shell-wrapper detection in parse phase.
     shellWrapperInvocation: parsed.shellPayload !== null,
   });
-  const requiresSecurityAuditSuppressionApproval =
-    commandRequiresSecurityAuditSuppressionApproval({
-      command: parsed.commandText,
-      cwd: parsed.cwd,
-      env: parsed.env,
-      segments,
-    }) && !(baseSecurity === "full" && baseAsk === "off" && !fallbackRequest);
-  if (forwardedAutoReview && requiresSecurityAuditSuppressionApproval) {
-    await sendSystemRunDenied(opts, parsed.execution, {
-      reason: "approval-required",
-      message: "SYSTEM_RUN_DENIED: explicit approval required",
-    });
-    return null;
-  }
-  if (requiresSecurityAuditSuppressionApproval && !policy.approvedByAsk) {
-    policy = {
-      ...policy,
-      allowed: false,
-      eventReason: "approval-required",
-      errorMessage: "SYSTEM_RUN_DENIED: approval required",
-      requiresAsk: true,
-    };
-  }
   let autoReviewDeferredMessage: string | undefined;
   analysisOk = policy.analysisOk;
   allowlistSatisfied = policy.allowlistSatisfied;
@@ -692,7 +608,6 @@ async function evaluateSystemRunPolicyPhase(
       inlineEvalHit === null &&
       !autoReviewBlockedByShellStartup &&
       autoReviewEligibility.eligible &&
-      !requiresSecurityAuditSuppressionApproval &&
       policy.eventReason !== "security=deny";
     if (canAutoReviewApprovalMiss) {
       const reviewer = await resolveSystemRunAutoReviewer({
@@ -987,8 +902,9 @@ async function executeSystemRunPhase(
       approvalSource: macApprovalSource,
       ...(phase.approvalGrantSource ? { policySnapshot: phase.evaluationPolicySnapshot } : {}),
     };
-    const response = await opts.runViaMacAppExecHost({
-      approvals: phase.approvals,
+    const response = await requestExecHostViaSocket({
+      socketPath: phase.approvals.socketPath,
+      token: phase.approvals.token,
       request: execRequest,
       signal: opts.signal,
     });
@@ -996,24 +912,22 @@ async function executeSystemRunPhase(
       return;
     }
     if (!response) {
-      if (opts.execHostEnforced || !opts.execHostFallbackAllowed) {
-        await sendSystemRunDenied(opts, phase.execution, {
-          reason: "companion-unavailable",
-          message: "COMPANION_APP_UNAVAILABLE: macOS app exec host unreachable",
-        });
-        return;
-      }
-    } else if (!response.ok) {
+      await sendSystemRunDenied(opts, phase.execution, {
+        reason: "companion-unavailable",
+        message: "COMPANION_APP_UNAVAILABLE: macOS app exec host unreachable",
+      });
+      return;
+    }
+    if (!response.ok) {
       await sendSystemRunDenied(opts, phase.execution, {
         reason: normalizeDeniedReason(response.error.reason),
         message: response.error.message,
       });
       return;
-    } else {
-      const result: ExecHostRunResult = response.payload;
-      await sendSystemRunCompleted(opts, phase.execution, result, JSON.stringify(result));
-      return;
     }
+    const result: ExecHostRunResult = response.payload;
+    await sendSystemRunCompleted(opts, phase.execution, result, JSON.stringify(result));
+    return;
   }
 
   if (phase.needsScreenRecording) {

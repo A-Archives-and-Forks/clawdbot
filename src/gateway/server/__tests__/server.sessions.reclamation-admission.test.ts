@@ -2,7 +2,6 @@ import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { WorkerOptions } from "node:worker_threads";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { afterEach, expect, onTestFinished, test, vi } from "vitest";
-import { withTestTimeout } from "../../../../test/helpers/promise.js";
 import {
   deleteSessionEntryLifecycle,
   loadSessionEntry,
@@ -11,6 +10,7 @@ import { resolveSqliteTargetFromSessionStorePath } from "../../../config/session
 import { beginSessionWorkAdmission } from "../../../sessions/session-lifecycle-admission.js";
 import { invalidateOpenClawAgentDatabaseValidation } from "../../../state/openclaw-agent-db-validation-cache.js";
 import {
+  closeOpenClawAgentDatabaseByPathAsync,
   closeOpenClawAgentDatabasesAsync,
   closeOpenClawAgentDatabasesForTest,
   openOpenClawAgentDatabase,
@@ -170,13 +170,13 @@ function holdReclamationValidation(databasePath?: string) {
       void operation.catch(() => {});
       return operation;
     },
-    async entered(operation: Promise<unknown>) {
-      // RPCs retain their own timeout; an early response must not masquerade as
-      // a held native check. The direct lifecycle sibling supplies the same bound.
+    async entered(operation: Promise<unknown>, testSignal: AbortSignal) {
+      // An early response must not masquerade as a held native check. The test signal
+      // ends the wait on timeout so the caller's finally still releases the gate.
       const waiting = new AbortController();
       const held = (async () => {
         while (Atomics.load(gate, 0) === 0) {
-          if (waiting.signal.aborted) {
+          if (waiting.signal.aborted || testSignal.aborted) {
             return undefined;
           }
           await yieldToEventLoop();
@@ -201,7 +201,9 @@ function holdReclamationValidation(databasePath?: string) {
   };
 }
 
-test("sessions.delete admits unrelated same-store patches during Worker validation", async () => {
+test("sessions.delete admits unrelated same-store patches during Worker validation", async ({
+  signal,
+}) => {
   const targetKey = "agent:main:validation-delete";
   const unrelatedKey = "agent:main:validation-patch";
   const { storePath } = await createSessionStoreDir();
@@ -223,7 +225,7 @@ test("sessions.delete admits unrelated same-store patches during Worker validati
       resolveSqliteTargetFromSessionStorePath(storePath, { agentId: "main" }).path,
     );
     const deletion = validation.own(rpcReq(ws, "sessions.delete", { key: targetKey }));
-    await validation.entered(deletion);
+    await validation.entered(deletion, signal);
     expect(loadSessionEntry({ sessionKey: targetKey, storePath })?.sessionId).toBe(
       "validation-delete",
     );
@@ -255,9 +257,7 @@ test("sessions.delete admits unrelated same-store patches during Worker validati
     const patch = validation.own(
       rpcReq(ws, "sessions.patch", { key: unrelatedKey, label: "progressed" }),
     );
-    await expect(
-      withTestTimeout(patch, 2_000, "unrelated same-store patch waited for reclamation validation"),
-    ).resolves.toMatchObject({ ok: true });
+    await expect(patch).resolves.toMatchObject({ ok: true });
     expect(loadSessionEntry({ sessionKey: unrelatedKey, storePath })?.label).toBe("progressed");
     expect(admissionSettled).toBe(false);
     expect(Atomics.load(gate, 2)).toBe(0);
@@ -277,7 +277,9 @@ test("sessions.delete admits unrelated same-store patches during Worker validati
   }
 });
 
-test("sessions.delete rejects revoked authority before repairing the same database", async () => {
+test("sessions.delete rejects revoked authority before repairing the same database", async ({
+  signal,
+}) => {
   // This test invokes the lifecycle owner directly instead of the foreground RPC dispatcher.
   onTestFinished(retainSessionListForegroundWork());
   const sessionKey = "agent:main:validation-revoked";
@@ -292,6 +294,8 @@ test("sessions.delete rejects revoked authority before repairing the same databa
     agentId: "main",
     path: resolveSqliteTargetFromSessionStorePath(storePath, { agentId: "main" }).path,
   };
+  // Retire the seeded executor so validation must open beside this native handle.
+  await closeOpenClawAgentDatabaseByPathAsync(databaseOptions.path, "main");
   const database = openOpenClawAgentDatabase(databaseOptions);
   const stateDatabase = openOpenClawStateDatabase();
   const readLeases = () =>
@@ -326,9 +330,7 @@ test("sessions.delete rejects revoked authority before repairing the same databa
         },
       }),
     );
-    await validation.entered(
-      withTestTimeout(deletion, 10_000, "reclamation Worker did not enter native validation"),
-    );
+    await validation.entered(deletion, signal);
     expect(readRepairIndex()).toBeUndefined();
     expect(openOpenClawAgentDatabase(databaseOptions)).toBe(database);
     expect(database.db.isOpen).toBe(true);

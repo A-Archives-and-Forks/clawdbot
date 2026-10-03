@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { toStringifiedError } from "@openclaw/normalization-core/error-coercion";
 import { createSubsystemLogger } from "../logging/subsystem.js";
+import { notifyListeners, registerListener } from "../shared/listeners.js";
 import type { ModelCatalogSnapshot } from "./model-catalog.types.js";
 import { PreparedModelRuntimePublicationSupersededError } from "./prepared-model-runtime.errors.js";
 import type {
@@ -55,6 +56,7 @@ export function createCatalogAttemptReporter(
   source: PreparedModelCatalogAttempt["source"],
   isCurrent: () => boolean,
   beforeProviderFailure: () => void,
+  isPublished?: () => boolean,
 ) {
   // Compatible reloads share live status; replacement sources start without the old error.
   const attempt: PreparedModelCatalogAttempt =
@@ -94,11 +96,13 @@ export function createCatalogAttemptReporter(
       }
       pendingProviders[kind] = undefined;
       owner.catalogAttempt = attempt;
-      notifyPreparedModelRuntimePublication({
-        phase: "catalog-failed",
-        error: toStringifiedError(error),
-        modelFactsChanged: false,
-      });
+      if (isPublished?.() !== false) {
+        notifyPreparedModelRuntimePublication({
+          phase: "catalog-failed",
+          error: toStringifiedError(error),
+          modelFactsChanged: false,
+        });
+      }
     }
   };
   const hasFailedProviders = () =>
@@ -165,10 +169,13 @@ export function createCatalogAttemptReporter(
         attempt.failedProviders[acquisitionKind].clear();
       }
       owner.catalogAttempt = attempt;
-      notifyPreparedModelCatalogPublication(
-        publication?.(),
-        previouslyPendingCount !== pendingCount() || previouslyFailed !== hasFailedProviders(),
-      );
+      const change = publication?.();
+      if (isPublished?.() !== false) {
+        notifyPreparedModelCatalogPublication(
+          change,
+          previouslyPendingCount !== pendingCount() || previouslyFailed !== hasFailedProviders(),
+        );
+      }
     },
     failed,
   };
@@ -178,20 +185,15 @@ export function createCatalogAttemptReporter(
 export function registerPreparedModelRuntimePublicationListener(
   listener: (event: PreparedModelRuntimePublicationEvent) => void,
 ): () => void {
-  publicationListeners.add(listener);
-  return () => publicationListeners.delete(listener);
+  return registerListener(publicationListeners, listener);
 }
 
 export function notifyPreparedModelRuntimePublication(
   event: PreparedModelRuntimePublicationEvent,
 ): void {
-  for (const listener of publicationListeners) {
-    try {
-      listener(event);
-    } catch (error) {
-      log.warn(`prepared model runtime publication listener failed: ${String(error)}`);
-    }
-  }
+  notifyListeners(publicationListeners, event, (error) => {
+    log.warn(`prepared model runtime publication listener failed: ${String(error)}`);
+  });
 }
 
 export function resetPreparedModelRuntimePublicationListenersForTest(): void {

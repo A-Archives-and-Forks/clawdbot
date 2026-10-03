@@ -3,7 +3,7 @@ import type { QueueMode } from "../../../../packages/gateway-protocol/src/schema
 import type { AdmittedRunOperatorAuthority } from "../../../agents/admitted-run-context.js";
 import type { AutoFallbackPrimaryProbe } from "../../../agents/agent-scope.js";
 import type { ExecToolDefaults } from "../../../agents/bash-tools.js";
-import type { CliSessionBindingFacts } from "../../../agents/cli-runner/types.js";
+import type { CliSessionBindingFacts } from "../../../agents/cli-runner/session-binding.types.js";
 import type {
   CurrentInboundPromptContext,
   RunEmbeddedAgentParams,
@@ -18,6 +18,7 @@ import type { ChannelAdmissionEvidence } from "../../../channels/message-access/
 import type { SessionEntry, SessionToolOverrides } from "../../../config/sessions.js";
 import type { ReplyToMode } from "../../../config/types.base.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
+import type { QueueDropPolicy } from "../../../config/types.queue.js";
 import type { GroupToolPolicyConfig } from "../../../config/types.tools.js";
 import type { GatewayLocalUserIngress } from "../../../gateway/local-user-ingress.js";
 import type { GatewayUiCommandTarget } from "../../../gateway/ui-command-target.types.js";
@@ -47,7 +48,7 @@ import type {
 } from "../directives.js";
 import type { ReplyOperationRunState } from "../reply-operation-run-state.js";
 
-export type QueueDropPolicy = "old" | "new" | "summarize";
+export type { QueueDropPolicy } from "../../../config/types.queue.js";
 
 export type QueueSettings = {
   mode: QueueMode;
@@ -114,6 +115,11 @@ export type FollowupRun = {
   sourceTurnId?: string;
   /** Original operator capability retained by this turn's queue/run lifecycle. */
   operatorAuthority?: AdmittedRunOperatorAuthority;
+  /**
+   * Source turn's trusted owner status for memory audience resolution only. System-owned
+   * maintenance copies keep `run.senderIsOwner: false`, so they never gain owner tool authority.
+   */
+  memoryAudienceSenderIsOwner?: boolean;
   /** Latest session to claim without rewriting the queued run before store refresh. */
   admissionSessionId?: string;
   /** User-visible prompt body persisted to transcript; excludes runtime-only prompt context. */
@@ -160,6 +166,8 @@ export type FollowupRun = {
   };
   /** Internal marker for the one-shot stranded final recovery retry. */
   strandedReplyRetry?: boolean;
+  /** This continuation owes last-resort feedback if it also stalls, including claimed input. */
+  stalledTurnRecovery?: boolean;
   /** Preserve priority runs when old-item queue overflow eviction runs before drain. */
   protectFromQueueOverflow?: boolean;
   enqueuedAt: number;

@@ -11,6 +11,7 @@ import {
 } from "../config/io.js";
 import { resolveMainSessionKey } from "../config/sessions/main-session.js";
 import {
+  consumeSelectedSystemEventEntries as consumeSdkSystemEventEntries,
   enqueueRoutedSystemEvent,
   enqueueSystemEvent as enqueueSdkSystemEvent,
   peekSystemEventEntries as peekSdkSystemEventEntries,
@@ -31,6 +32,57 @@ import {
   resolveSystemEventDeliveryContext,
   type SystemEvent,
 } from "./system-events.js";
+
+describe("delivery-owned system event selection", () => {
+  beforeEach(() => resetSystemEventsForTest());
+  afterEach(() => resetSystemEventsForTest());
+
+  it("formats retained occurrences in captured order and leaves late arrivals untouched", async () => {
+    const sessionKey = "agent:main:deferred-order-proof";
+    enqueueSystemEvent("Restart first", { sessionKey, contextKey: "task:restart-sentinel:first" });
+    enqueueSystemEvent("Newer instruction second", { sessionKey });
+    const captured = peekSystemEventEntries(sessionKey);
+    const retainedId = expectDefined(captured[0]?.id, "captured restart occurrence ID");
+    enqueueSystemEvent("Late arrival third", { sessionKey });
+    const text = await drainFormattedSystemEvents({
+      cfg: {},
+      agentId: "main",
+      sessionKey,
+      isMainSession: false,
+      isNewSession: false,
+      events: captured,
+      deferredEventIds: [retainedId],
+    });
+    expect(text?.indexOf("Restart first")).toBeLessThan(text!.indexOf("Newer instruction second"));
+    expect(text).not.toContain("Late arrival third");
+    expect(peekSystemEvents(sessionKey)).toEqual(["Restart first", "Late arrival third"]);
+    consumeSelectedSystemEventEntries(sessionKey, [captured[0]!]);
+    expect(peekSystemEvents(sessionKey)).toEqual(["Late arrival third"]);
+  });
+
+  it("does not re-admit a captured retained occurrence consumed by another turn", async () => {
+    const sessionKey = "agent:main:deferred-membership-proof";
+    enqueueSystemEvent("Already handled restart", {
+      sessionKey,
+      contextKey: "task:restart-sentinel:handled",
+    });
+    const captured = peekSystemEventEntries(sessionKey);
+    const retainedId = expectDefined(captured[0]?.id, "captured restart occurrence ID");
+    consumeSelectedSystemEventEntries(sessionKey, captured);
+    enqueueSystemEvent("Replacement arrival", { sessionKey });
+    const text = await drainFormattedSystemEvents({
+      cfg: {},
+      agentId: "main",
+      sessionKey,
+      isMainSession: false,
+      isNewSession: false,
+      events: captured,
+      deferredEventIds: [retainedId],
+    });
+    expect(text).toBeUndefined();
+    expect(peekSystemEvents(sessionKey)).toEqual(["Replacement arrival"]);
+  });
+});
 
 type SystemEventsModule = typeof import("./system-events.js");
 
@@ -95,19 +147,35 @@ describe("system events (session routing)", () => {
     expect(() => enqueueSystemEvent("Node: Mac Studio", { sessionKey: " " })).toThrow("sessionKey");
   });
 
+  it("consumes selected SDK snapshots without draining later events or another owner", () => {
+    const alpha = "agent:alpha:work";
+    const beta = "agent:beta:work";
+    enqueueSdkSystemEvent("Selected", { sessionKey: alpha });
+    const snapshot = peekSdkSystemEventEntries(alpha);
+    enqueueSdkSystemEvent("Later", { sessionKey: alpha });
+    enqueueSdkSystemEvent("Other owner", { sessionKey: beta });
+
+    consumeSdkSystemEventEntries(alpha, snapshot);
+
+    expect(peekSdkSystemEventEntries(alpha).map((event) => event.text)).toEqual(["Later"]);
+    expect(peekSdkSystemEventEntries(beta).map((event) => event.text)).toEqual(["Other owner"]);
+  });
+
   it.each(["main", "global", "unknown"])(
-    "resolves legacy SDK %s only at its configured owner boundary",
+    "resolves SDK %s only at its explicitly selected owner boundary",
     (alias) => {
       const previous = getRuntimeConfigSnapshot();
       try {
         setRuntimeConfigSnapshot({
-          agents: { entries: { alpha: { default: true }, beta: {} } },
+          agents: { entries: { alpha: {}, beta: {} } },
           session: { mainKey: "work" },
         });
         expect(() => enqueueSystemEvent("Unbound", { sessionKey: alias })).toThrow(
           "agent-qualified",
         );
-        expect(enqueueSdkSystemEvent("Legacy caller", { sessionKey: alias })).toBe(true);
+        expect(
+          enqueueSdkSystemEvent("Legacy caller", { sessionKey: alias, agentId: "alpha" }),
+        ).toBe(true);
         const suffix = alias === "main" ? "work" : alias;
         expect(peekSystemEvents(`agent:alpha:${suffix}`)).toEqual(["Legacy caller"]);
         expect(peekSystemEvents(`agent:beta:${suffix}`)).toEqual([]);
@@ -115,7 +183,7 @@ describe("system events (session routing)", () => {
         expect(peekSdkSystemEventEntries(alias, " BETA ").map((event) => event.text)).toEqual([
           "Owned caller",
         ]);
-        expect(peekSdkSystemEventEntries(alias).map((event) => event.text)).toEqual([
+        expect(peekSdkSystemEventEntries(alias, "alpha").map((event) => event.text)).toEqual([
           "Legacy caller",
         ]);
         expect(
@@ -156,7 +224,7 @@ describe("system events (session routing)", () => {
     const previous = getRuntimeConfigSnapshot();
     try {
       setRuntimeConfigSnapshot({
-        agents: { entries: { main: { default: true }, beta: {} } },
+        agents: { entries: { main: {}, beta: {} } },
         session: { scope: "global" },
       });
       enqueueSystemEvent("Main canary", { sessionKey: "agent:main:global" });
@@ -186,7 +254,7 @@ describe("system events (session routing)", () => {
     (sessionKey) => {
       const previous = getRuntimeConfigSnapshot();
       try {
-        setRuntimeConfigSnapshot({ agents: { entries: { "beta-team": { default: true } } } });
+        setRuntimeConfigSnapshot({ agents: { entries: { "beta-team": {} } } });
         expect(enqueueSdkSystemEvent("Team event", { sessionKey, agentId: " Beta Team " })).toBe(
           true,
         );

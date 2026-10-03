@@ -13,7 +13,7 @@ import {
   resolveToolApprovalReviewOutcome,
   withToolApprovalReviews,
 } from "../../lib/chat/tool-approval-reviews.ts";
-import type { DiffStat } from "../../lib/chat/tool-call-diff.ts";
+import { readLiveDiffStat } from "../../lib/chat/tool-call-diff.ts";
 import { formatUiExternalText } from "../../lib/format-error.ts";
 import { formatUnknownText, truncateText } from "../../lib/format.ts";
 import { uiSessionEventMatches } from "../../lib/sessions/session-key.ts";
@@ -86,20 +86,6 @@ function formatToolOutput(value: unknown): string | null {
     return truncated.text;
   }
   return `${truncated.text}\n\n… truncated (${truncated.total} chars, showing first ${truncated.text.length}).`;
-}
-
-function readLiveDiffStat(value: unknown): DiffStat | undefined {
-  const diff = readRecord(value);
-  const added = diff?.added;
-  const removed = diff?.removed;
-  return typeof added === "number" &&
-    Number.isInteger(added) &&
-    added >= 0 &&
-    typeof removed === "number" &&
-    Number.isInteger(removed) &&
-    removed >= 0
-    ? { added, removed }
-    : undefined;
 }
 
 function refreshSessionStatusModel(host: ToolStreamHost, data: Record<string, unknown>) {
@@ -522,7 +508,9 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
       ? Value.Clean(AgentActivityItemSchema, { ...payload.data })
       : undefined;
   if (Value.Check(AgentActivityItemSchema, activityItem)) {
-    if (!acceptsToolStreamSession(host, payload)) {
+    // Analysis items (Codex reasoning, context compaction) are not tool calls;
+    // a tool card would show a fabricated empty input and a completion.
+    if (!acceptsToolStreamSession(host, payload) || activityItem.kind === "analysis") {
       return true;
     }
     const item = activityItem;
@@ -611,53 +599,44 @@ export function handleAgentEvent(host: ToolStreamHost, payload?: AgentEventPaylo
     entry = {
       toolCallId,
       runId: payload.runId,
-      ...(parentToolCallId ? { parentToolCallId } : {}),
       sessionKey,
       name,
-      args,
-      output: output || undefined,
-      ...(initialResultDetails !== undefined ? { details: initialResultDetails } : {}),
-      ...(resultIsError !== undefined ? { isError: resultIsError } : {}),
-      ...(exitCode !== undefined ? { exitCode } : {}),
-      ...(liveDiffStat ? { liveDiffStat } : {}),
-      ...(phase === "result" ? { resultReceived: true } : {}),
       startedAt: typeof payload.ts === "number" ? payload.ts : now,
       receivedAt: now,
       message: {},
     };
     host.toolStreamById.set(toolStreamIdentity, entry);
     host.toolStreamOrder.push(toolStreamIdentity);
-  } else {
-    entry.name = name;
-    entry.parentToolCallId ??= parentToolCallId;
-    if (args !== undefined) {
-      entry.args = args;
-    }
-    if (output !== undefined) {
-      entry.output = output || undefined;
-    }
-    if (resultDetails !== undefined || resultApprovalReviewOutcome) {
-      const currentOutcome = readToolApprovalReviewOutcome(entry.details);
-      const outcome =
-        currentOutcome === "denied" ? "denied" : (resultApprovalReviewOutcome ?? currentOutcome);
-      const reviews = readToolApprovalReviews(entry.details);
-      entry.details = reviews.length
-        ? withToolApprovalReviews(resultDetails, reviews, outcome)
-        : initialResultDetails;
-    }
-    if (resultIsError !== undefined) {
-      entry.isError = resultIsError;
-    }
-    if (exitCode !== undefined) {
-      entry.exitCode = exitCode;
-    }
-    if (liveDiffStat) {
-      entry.liveDiffStat = liveDiffStat;
-    }
-    if (phase === "result") {
-      entry.liveDiffStat = undefined;
-      entry.resultReceived = true;
-    }
+  }
+  entry.name = name;
+  entry.parentToolCallId ??= parentToolCallId;
+  if (args !== undefined) {
+    entry.args = args;
+  }
+  if (output !== undefined) {
+    entry.output = output || undefined;
+  }
+  if (resultDetails !== undefined || resultApprovalReviewOutcome) {
+    const currentOutcome = readToolApprovalReviewOutcome(entry.details);
+    const outcome =
+      currentOutcome === "denied" ? "denied" : (resultApprovalReviewOutcome ?? currentOutcome);
+    const reviews = readToolApprovalReviews(entry.details);
+    entry.details = reviews.length
+      ? withToolApprovalReviews(resultDetails, reviews, outcome)
+      : initialResultDetails;
+  }
+  if (resultIsError !== undefined) {
+    entry.isError = resultIsError;
+  }
+  if (exitCode !== undefined) {
+    entry.exitCode = exitCode;
+  }
+  if (liveDiffStat) {
+    entry.liveDiffStat = liveDiffStat;
+  }
+  if (phase === "result") {
+    entry.liveDiffStat = undefined;
+    entry.resultReceived = true;
   }
 
   if (approvalReview) {

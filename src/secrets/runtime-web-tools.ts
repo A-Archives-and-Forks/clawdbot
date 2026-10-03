@@ -1,7 +1,7 @@
 /** Builds web-tool secret metadata from config, plugins, and provider contracts. */
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { resolveSecretInputRef } from "../config/types.secrets.js";
+import { coerceSecretRef } from "../config/types.secrets.js";
 import { loadInstalledPluginIndexInstallRecordsSync } from "../plugins/installed-plugin-index-records.js";
 import type { PluginManifestRecord } from "../plugins/manifest-registry.js";
 import type {
@@ -36,14 +36,15 @@ import { hasCredentialBearingObjectValue } from "./runtime-secret-scan.js";
 import type { ResolverContext, SecretDefaults } from "./runtime-shared.js";
 import { getActiveSecretsRuntimeSnapshotState } from "./runtime-state.js";
 import { runtimeWebSecretOwnerId } from "./runtime-web-secret-owner.js";
+import type {
+  RuntimeWebProviderSelectionResult,
+  RuntimeWebSecretOwner,
+  RuntimeWebUnavailableProvider,
+  SecretResolutionResult,
+} from "./runtime-web-tools-selection.types.js";
 import {
-  isRecord,
   resolveRuntimeWebProviderSurface,
   resolveRuntimeWebProviderSelection,
-  type RuntimeWebProviderSelectionResult,
-  type RuntimeWebSecretOwner,
-  type RuntimeWebUnavailableProvider,
-  type SecretResolutionResult,
 } from "./runtime-web-tools.shared.js";
 import type {
   RuntimeWebDiagnostic,
@@ -52,6 +53,7 @@ import type {
   RuntimeWebToolsMetadata,
 } from "./runtime-web-tools.types.js";
 import { isExpectedResolvedSecretValue } from "./secret-value.js";
+import { isRecord } from "./shared.js";
 
 const loadRuntimeWebToolsFallbackProviders = createLazyRuntimeSurface(
   () => import("./runtime-web-tools-fallback.runtime.js"),
@@ -423,10 +425,8 @@ async function resolveSecretInputWithEnvFallback(params: {
   restrictEnvRefsToEnvVars?: boolean;
   forceColdRefKeys?: ReadonlySet<string>;
 }): Promise<SecretResolutionResult<SecretResolutionSource>> {
-  const { ref } = resolveSecretInputRef({
-    value: params.value,
-    defaults: params.defaults,
-  });
+  // Provider credential callbacks retain their shipped unknown-valued input contract.
+  const ref = coerceSecretRef(params.value, params.defaults);
 
   if (!ref) {
     const configValue = normalizeSecretInput(params.value);
@@ -526,21 +526,12 @@ async function resolveSecretInputWithEnvFallback(params: {
     }
   }
 
-  if (resolvedFromRef) {
-    return {
-      value: resolvedFromRef,
-      source: "secretRef",
-      secretRefConfigured: true,
-      secretRef: ref,
-      secretRefKey: secretRefKey(ref),
-    };
-  }
-
   return {
-    source: "missing",
+    ...(resolvedFromRef
+      ? { value: resolvedFromRef, source: "secretRef" as const }
+      : { source: "missing" as const, unresolvedRefReason }),
     secretRef: ref,
     secretRefKey: secretRefKey(ref),
-    unresolvedRefReason,
     secretRefConfigured: true,
   };
 }

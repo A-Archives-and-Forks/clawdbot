@@ -317,19 +317,17 @@ function isMoonshotLiveTest(file: string) {
   return file.startsWith("extensions/moonshot/");
 }
 
-// Release-lead waiver for 2026.9.7 (Peter, 2026-09-29 00:40 PT): these files' only
-// live case is skipped on the release branch, so selecting them would leave no passing
-// assertion. Scoped to the exact candidate version; restore after #161083/#161084 and
-// the subagent cold-restart follow-up land.
+// The frozen 2026.9.8 and 2026.9.9 candidates retain three intentionally skipped single-case
+// live files. The trusted tooling checkout owns shard selection, so omit those
+// candidate files here rather than weakening the per-file passing-assertion guard.
+const RELEASE_2026_9_8_AND_9_WAIVED_LIVE_FILES = new Set([
+  "src/gateway/gateway-progress-refresh.live.test.ts",
+  "src/agents/embedded-agent-runner.responses-output-limit.live.test.ts",
+  "test/gateway-subagent-restart.live.test.ts",
+]);
 const RELEASE_WAIVED_LIVE_FILES = new Map<string, ReadonlySet<string>>([
-  [
-    "2026.9.7",
-    new Set([
-      "src/gateway/gateway-progress-refresh.live.test.ts",
-      "src/agents/embedded-agent-runner.responses-output-limit.live.test.ts",
-      "test/gateway-subagent-restart.live.test.ts",
-    ]),
-  ],
+  ["2026.9.8", RELEASE_2026_9_8_AND_9_WAIVED_LIVE_FILES],
+  ["2026.9.9", RELEASE_2026_9_8_AND_9_WAIVED_LIVE_FILES],
 ]);
 
 export function withoutReleaseWaivedLiveFiles(

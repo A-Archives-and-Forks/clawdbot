@@ -11,6 +11,8 @@ export type WorkboardLoadToken = {
 type WorkboardLiveRefreshEntry = {
   client: GatewayBrowserClient | null;
   requestUpdate?: () => void;
+  refresh?: () => Promise<boolean>;
+  shouldDefer?: () => boolean;
 };
 
 type WorkboardRuntime = {

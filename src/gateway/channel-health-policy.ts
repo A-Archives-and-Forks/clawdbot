@@ -1,6 +1,8 @@
-// Gateway channel health policy.
-// Evaluates channel lifecycle snapshots for restart/readiness decisions.
-import { isFutureDateTimestampMs } from "@openclaw/normalization-core/number-coercion";
+import {
+  asFiniteNumber,
+  isFutureDateTimestampMs,
+  resolveNonNegativeIntegerOption,
+} from "@openclaw/normalization-core/number-coercion";
 import type { ChannelAccountSnapshot, ChannelId } from "../channels/plugins/types.public.js";
 
 type ChannelHealthSnapshot = Omit<ChannelAccountSnapshot, "accountId">;
@@ -50,10 +52,6 @@ type ChannelRestartReason =
   | "disconnected"
   | "ingress-unavailable";
 
-function isManagedAccount(snapshot: ChannelHealthSnapshot): boolean {
-  return snapshot.enabled !== false && snapshot.configured !== false && snapshot.linked !== false;
-}
-
 function resolveObservedChannelTimestamp(value: unknown, now: number): number | null {
   return typeof value === "number" &&
     Number.isFinite(value) &&
@@ -73,7 +71,7 @@ export function evaluateChannelHealth(
   snapshot: ChannelHealthSnapshot,
   policy: ChannelHealthPolicy,
 ): ChannelHealthEvaluation {
-  if (!isManagedAccount(snapshot)) {
+  if (snapshot.enabled === false || snapshot.configured === false || snapshot.linked === false) {
     return { healthy: true, reason: "unmanaged" };
   }
   if (!snapshot.running && snapshot.terminalDisconnect) {
@@ -91,10 +89,7 @@ export function evaluateChannelHealth(
   if (snapshot.lifecycle === "blocked") {
     return { healthy: false, reason: "blocked" };
   }
-  const lastStartAt =
-    typeof snapshot.lastStartAt === "number" && Number.isFinite(snapshot.lastStartAt)
-      ? snapshot.lastStartAt
-      : null;
+  const lastStartAt = asFiniteNumber(snapshot.lastStartAt) ?? null;
   const currentLifecycleStarted =
     lastStartAt !== null && !isFutureDateTimestampMs(lastStartAt, { nowMs: policy.now });
   // Trust recorded starting/recovering only inside connect grace. Without a timestamp or after
@@ -109,10 +104,7 @@ export function evaluateChannelHealth(
   if (snapshot.lifecycle === "stopped" || !snapshot.running) {
     return { healthy: false, reason: "not-running" };
   }
-  const activeRuns =
-    typeof snapshot.activeRuns === "number" && Number.isFinite(snapshot.activeRuns)
-      ? Math.max(0, Math.trunc(snapshot.activeRuns))
-      : 0;
+  const activeRuns = resolveNonNegativeIntegerOption(snapshot.activeRuns, 0);
   const isBusy = snapshot.busy === true || activeRuns > 0;
   const lastRunActivityAt = resolveObservedChannelTimestamp(snapshot.lastRunActivityAt, policy.now);
   const activeRunStartedAt = resolveObservedChannelTimestamp(
@@ -191,20 +183,15 @@ export function resolveChannelRestartReason(
 ): ChannelRestartReason {
   // Restart reasons are intentionally coarse: downstream logs/UI need stable
   // categories, while detailed channel state stays in the health snapshot.
-  if (evaluation.reason === "stale-socket") {
-    return "stale-socket";
-  }
-  // Restarting is also the only way to re-prove ingress: `ingressUnavailable`
-  // describes the last start attempt and is cleared by the next one. Naming the
-  // reason keeps a repeating restart readable as dead inbound rather than "stuck".
-  if (evaluation.reason === "ingress-unavailable") {
-    return "ingress-unavailable";
+  if (
+    evaluation.reason === "stale-socket" ||
+    evaluation.reason === "ingress-unavailable" ||
+    evaluation.reason === "disconnected"
+  ) {
+    return evaluation.reason;
   }
   if (evaluation.reason === "not-running") {
     return snapshot.reconnectAttempts && snapshot.reconnectAttempts >= 10 ? "gave-up" : "stopped";
-  }
-  if (evaluation.reason === "disconnected") {
-    return "disconnected";
   }
   return "stuck";
 }

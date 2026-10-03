@@ -8,40 +8,6 @@ import {
 } from "./stale-subagent-allowlist.js";
 
 describe("stale subagent allowlist doctor repair", () => {
-  it("detects stale default and per-agent subagent targets", () => {
-    const cfg = {
-      agents: {
-        defaults: {
-          subagents: {
-            allowAgents: ["planner", "stale-default"],
-          },
-        },
-        list: [
-          {
-            id: "main",
-            subagents: {
-              allowAgents: ["planner", "stale-main"],
-            },
-          },
-          { id: "planner" },
-        ],
-      },
-    } as OpenClawConfig;
-
-    expect(scanStaleSubagentAllowlistReferences(cfg)).toStrictEqual([
-      {
-        pathLabel: "agents.defaults.subagents.allowAgents",
-        agentId: "stale-default",
-        normalizedAgentId: "stale-default",
-      },
-      {
-        pathLabel: "agents.list.main.subagents.allowAgents",
-        agentId: "stale-main",
-        normalizedAgentId: "stale-main",
-      },
-    ]);
-  });
-
   it("keeps wildcard, configured OpenClaw agents, and configured ACP targets", () => {
     const cfg = {
       acp: {
@@ -54,16 +20,15 @@ describe("stale subagent allowlist doctor repair", () => {
             allowAgents: ["*", "main", "planner", "codex", "claude", "writer", "stale"],
           },
         },
-        list: [
-          { id: "main" },
-          { id: "planner" },
-          {
-            id: "writer-agent",
+        entries: {
+          main: {},
+          planner: {},
+          "writer-agent": {
             runtime: { type: "acp", acp: { agent: "writer" } },
           },
-        ],
+        },
       },
-    } as OpenClawConfig;
+    } satisfies OpenClawConfig;
 
     expect(scanStaleSubagentAllowlistReferences(cfg)).toStrictEqual([
       {
@@ -82,25 +47,27 @@ describe("stale subagent allowlist doctor repair", () => {
             allowAgents: ["stale"],
           },
         },
-        list: [
-          {
-            id: "main",
+        entries: {
+          main: {
             subagents: {
               allowAgents: ["*", "planner", "stale-main"],
             },
           },
-          { id: "planner" },
-        ],
+          planner: {},
+        },
       },
-    } as OpenClawConfig;
+    } satisfies OpenClawConfig;
 
     const result = maybeRepairStaleSubagentAllowlists(cfg);
 
     expect(result.config.agents?.defaults?.subagents?.allowAgents).toStrictEqual([]);
-    expect(result.config.agents?.list?.[0]?.subagents?.allowAgents).toStrictEqual(["*", "planner"]);
+    expect(result.config.agents?.entries?.main?.subagents?.allowAgents).toStrictEqual([
+      "*",
+      "planner",
+    ]);
     expect(result.changes).toStrictEqual([
       "- agents.defaults.subagents.allowAgents: removed 1 stale subagent target id (stale)",
-      "- agents.list.main.subagents.allowAgents: removed 1 stale subagent target id (stale-main)",
+      "- agents.entries.main.subagents.allowAgents: removed 1 stale subagent target id (stale-main)",
     ]);
   });
 

@@ -58,7 +58,7 @@ import {
   filterRuntimeCompatibleTools,
 } from "../tool-schema-projection.js";
 import { logRuntimeToolSchemaQuarantine } from "../tool-schema-quarantine.js";
-import { prepareWatchedSessionsPrompt } from "../watched-sessions-prompt.js";
+import { prepareWatchedSessionsPromptAsync } from "../watched-sessions-prompt.js";
 import { resolveCompactionContextTokenBudget } from "./compaction-runtime-context.js";
 import type { DirectCompactionPreparation } from "./direct-compaction-preparation.js";
 import { applyFinalEffectiveToolPolicy } from "./effective-tool-policy.js";
@@ -122,15 +122,12 @@ export async function buildPreparedCompactionRuntime(
       return;
     }
     toolRuntimesDisposed = true;
-    try {
-      await bundleMcpRuntime?.dispose();
-    } catch {
-      /* best-effort */
-    }
-    try {
-      await bundleLspRuntime?.dispose();
-    } catch {
-      /* best-effort */
+    for (const runtime of [bundleMcpRuntime, bundleLspRuntime]) {
+      try {
+        await runtime?.dispose();
+      } catch {
+        /* best-effort */
+      }
     }
   };
   const restoreSkillEnvironment = () => {
@@ -339,14 +336,17 @@ export async function buildPreparedCompactionRuntime(
       modelApi: effectiveModel.api,
       model: effectiveModel,
     };
-    const normalizableToolProjection = filterProviderNormalizableTools(toolsRaw);
-    logRuntimeToolSchemaQuarantine({
-      diagnostics: normalizableToolProjection.diagnostics,
-      tools: toolsRaw,
+    const toolDiagnosticContext = {
       runId,
       agentId: sessionAgentId,
       sessionKey: params.sessionKey,
       sessionId: params.sessionId,
+    };
+    const normalizableToolProjection = filterProviderNormalizableTools(toolsRaw);
+    await logRuntimeToolSchemaQuarantine({
+      ...toolDiagnosticContext,
+      diagnostics: normalizableToolProjection.diagnostics,
+      tools: toolsRaw,
     });
     const tools = runtimePlan.tools.normalize(
       [...normalizableToolProjection.tools],
@@ -379,13 +379,10 @@ export async function buildPreparedCompactionRuntime(
     });
     const normalizableBundledToolProjection = filterProviderNormalizableTools(filteredBundledTools);
     if (normalizableBundledToolProjection.diagnostics.length > 0) {
-      logRuntimeToolSchemaQuarantine({
+      await logRuntimeToolSchemaQuarantine({
+        ...toolDiagnosticContext,
         diagnostics: normalizableBundledToolProjection.diagnostics,
         tools: filteredBundledTools,
-        runId,
-        agentId: sessionAgentId,
-        sessionKey: params.sessionKey,
-        sessionId: params.sessionId,
       });
     }
     const normalizedBundledTools =
@@ -397,13 +394,10 @@ export async function buildPreparedCompactionRuntime(
         : filteredBundledTools;
     const projectedEffectiveTools = [...tools, ...normalizedBundledTools];
     const toolSchemaProjection = filterRuntimeCompatibleTools(projectedEffectiveTools);
-    logRuntimeToolSchemaQuarantine({
+    await logRuntimeToolSchemaQuarantine({
+      ...toolDiagnosticContext,
       diagnostics: toolSchemaProjection.diagnostics,
       tools: projectedEffectiveTools,
-      runId,
-      agentId: sessionAgentId,
-      sessionKey: params.sessionKey,
-      sessionId: params.sessionId,
     });
     const effectiveTools = [...toolSchemaProjection.tools];
     const allowedToolNames = collectAllowedToolNames({ tools: effectiveTools });
@@ -528,13 +522,14 @@ export async function buildPreparedCompactionRuntime(
     });
     // Match live-turn policy gates so restricted endpoint compaction cannot disclose
     // private ambient sections through its model-visible developer prompt.
-    const preparedWatchedSessions = prepareWatchedSessionsPrompt({
+    const preparedWatchedSessions = await prepareWatchedSessionsPromptAsync({
       enabled: promptMode === "full",
       config: params.config,
       sessionKey: params.sessionKey,
       sandboxed: sandboxInfo?.enabled === true,
       toolNames: promptTools.map((tool) => tool.name),
       capabilityToolNames: promptAllowedToolNames,
+      assertCurrent: () => params.abortSignal?.throwIfAborted(),
     });
     const activeProjectKeys = params.preparedModelRuntime?.activeProjectKeys ?? [];
     const buildSystemPromptText = () => {

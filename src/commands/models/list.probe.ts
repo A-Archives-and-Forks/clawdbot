@@ -28,6 +28,7 @@ import {
 import { resolveAuthProfileOrderWithMetadata } from "../../agents/auth-profiles/order.js";
 import { resolveAuthProfileDatabasePath } from "../../agents/auth-profiles/sqlite.js";
 import { describeFailoverError } from "../../agents/failover-error.js";
+import { FAILOVER_PROBE_STATUS as PROBE_STATUS_BY_FAILOVER_REASON } from "../../agents/failover/probe-status.js";
 import type { FailoverReason } from "../../agents/failover/signal.js";
 import {
   prepareInternalSessionEffectsSession,
@@ -175,25 +176,6 @@ export type AuthProbeOptions = {
   concurrency: number;
   maxTokens: number;
 };
-
-const PROBE_STATUS_BY_FAILOVER_REASON = {
-  auth: "auth",
-  auth_permanent: "auth",
-  format: "format",
-  rate_limit: "rate_limit",
-  overloaded: "rate_limit",
-  billing: "billing",
-  server_error: "unknown",
-  timeout: "timeout",
-  tls_certificate: "unknown",
-  context_overflow: "unknown",
-  model_not_found: "format",
-  session_expired: "unknown",
-  empty_response: "unknown",
-  no_error_details: "unknown",
-  unclassified: "unknown",
-  unknown: "unknown",
-} satisfies Record<FailoverReason, AuthProbeStatus>;
 
 export function mapFailoverReasonToProbeStatus(reason?: string | null): AuthProbeStatus {
   return reason
@@ -844,11 +826,7 @@ async function probeTarget(params: {
     );
     const terminalError = extractAgentRunTerminalError(runResult);
     if (terminalError) {
-      const described = describeFailoverError(new Error(terminalError));
-      return buildResult(
-        mapFailoverReasonToProbeStatus(described.reason),
-        redactAuthProbeError(described.message),
-      );
+      throw new Error(terminalError);
     }
     if (!agentRunHasVisibleReply(runResult)) {
       return buildResult("format", "The model did not return a visible probe response.");
@@ -1054,13 +1032,6 @@ export async function runAuthProbes(params: {
       results: [...plan.results, ...results],
     };
   });
-}
-
-export function formatProbeLatency(latencyMs?: number | null) {
-  if (!latencyMs && latencyMs !== 0) {
-    return "-";
-  }
-  return formatMs(latencyMs);
 }
 
 export function sortProbeResults(results: AuthProbeResult[]): AuthProbeResult[] {

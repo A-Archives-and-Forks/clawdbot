@@ -14,8 +14,8 @@ import {
 import {
   enqueueRoutedSystemEvent as enqueueActualSystemEvent,
   peekSystemEventEntries,
-  resetSystemEventsForTest,
 } from "openclaw/plugin-sdk/system-event-runtime";
+import { resetSystemEventsForTest } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultTelegramBotDeps } from "./bot-deps.js";
 import { createTelegramEventBindings } from "./bot-handlers.event-bindings.js";
@@ -282,7 +282,8 @@ describe("registerTelegramReactionHandler forum topic recovery", () => {
   it("keeps a reaction on the runtime-bound global owner's queue", async () => {
     const cfg = {
       ...buildTelegramConfig(),
-      agents: { list: [{ id: "main", default: true }, { id: "research" }] },
+      agents: { entries: { main: {}, research: {} } },
+      bindings: [{ agentId: "main", match: { channel: "telegram", accountId: "default" } }],
     };
     setRuntimeConfigSnapshot(cfg);
     const binding = {

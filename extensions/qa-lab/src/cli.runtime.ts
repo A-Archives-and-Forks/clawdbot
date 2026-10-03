@@ -3,7 +3,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isCrablineServerChannel, OPENCLAW_CRABLINE_DEFAULT_CHANNEL } from "@openclaw/crabline";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
-import { parseStrictPositiveInteger } from "openclaw/plugin-sdk/number-runtime";
 import { parseBooleanValue, uniqueStrings } from "openclaw/plugin-sdk/string-coerce-runtime";
 import {
   buildQaAgenticParityComparison,
@@ -68,6 +67,7 @@ import {
   removeQaCredentialSet,
   type QaCredentialRecord,
 } from "./qa-credentials-admin.runtime.js";
+import { parseQaCredentialPositiveIntegerEnv } from "./qa-credentials-common.runtime.js";
 import { normalizeQaThinkingLevel, type QaThinkingLevel } from "./qa-gateway-config.js";
 import {
   normalizeQaTransportId,
@@ -191,21 +191,6 @@ function normalizeQaSuiteChannelDriver(
     return parsed.data;
   }
   throw new Error(`--channel-driver must be one of qa-channel, crabline, or live, got "${input}".`);
-}
-
-function resolveQaManualLaneModels(opts: {
-  providerMode: QaProviderMode;
-  primaryModel?: string;
-  alternateModel?: string;
-}) {
-  // `qa manual --model` is a one-model probe unless the operator also supplies
-  // `--alt-model`; materialize that contract before shared pair resolution.
-  const explicitPrimaryModel = opts.primaryModel?.trim();
-  return resolveQaRuntimeModelPair({
-    ...opts,
-    primaryModel: explicitPrimaryModel,
-    alternateModel: opts.alternateModel?.trim() || explicitPrimaryModel,
-  });
 }
 
 function parseQaThinkingLevel(
@@ -519,13 +504,7 @@ function parseQaModelSpecs(label: string, entries: readonly string[] | undefined
       const value = part.slice(separatorIndex + 1).trim();
       switch (key) {
         case "thinking": {
-          const thinkingDefault = parseQaThinkingLevel(`${label} thinking`, value);
-          if (!thinkingDefault) {
-            throw new Error(
-              `${label} thinking must be one of off, minimal, low, medium, high, xhigh, adaptive, max`,
-            );
-          }
-          options.thinkingDefault = thinkingDefault;
+          options.thinkingDefault = parseQaThinkingLevel(`${label} thinking`, value);
           break;
         }
         case "fast":
@@ -566,20 +545,12 @@ async function runInterruptibleServer(label: string, server: InterruptibleServer
   await new Promise(() => {});
 }
 
-function resolveQaCredentialPayloadFileMaxBytes(env: NodeJS.ProcessEnv = process.env) {
-  const raw = env[QA_CREDENTIAL_PAYLOAD_MAX_BYTES_ENV]?.trim();
-  if (!raw) {
-    return DEFAULT_QA_CREDENTIAL_PAYLOAD_MAX_BYTES;
-  }
-  const parsed = parseStrictPositiveInteger(raw);
-  if (parsed === undefined) {
-    throw new Error(`${QA_CREDENTIAL_PAYLOAD_MAX_BYTES_ENV} must be a positive integer.`);
-  }
-  return parsed;
-}
-
 async function readQaCredentialPayloadFile(filePath: string) {
-  const maxBytes = resolveQaCredentialPayloadFileMaxBytes();
+  const maxBytes = parseQaCredentialPositiveIntegerEnv({
+    env: process.env,
+    key: QA_CREDENTIAL_PAYLOAD_MAX_BYTES_ENV,
+    fallback: DEFAULT_QA_CREDENTIAL_PAYLOAD_MAX_BYTES,
+  });
   const stat = await fs.stat(filePath);
   if (!stat.isFile()) {
     throw new Error("Payload file must be a regular JSON file.");
@@ -624,20 +595,16 @@ function printQaCredentialListTable(credentials: QaCredentialRecord[]) {
     leased: formatQaCredentialLeaseState(credential),
     note: credential.note ?? "",
   }));
-  const idWidth = Math.max("credentialId".length, ...rows.map((row) => row.credentialId.length));
-  const fingerprintWidth = Math.max(
-    "fingerprint".length,
-    ...rows.map((row) => row.fingerprint.length),
-  );
-  const kindWidth = Math.max("kind".length, ...rows.map((row) => row.kind.length));
-  const statusWidth = Math.max("status".length, ...rows.map((row) => row.status.length));
-  const leaseWidth = Math.max("leased".length, ...rows.map((row) => row.leased.length));
-  process.stdout.write(
-    `${"credentialId".padEnd(idWidth)}  ${"fingerprint".padEnd(fingerprintWidth)}  ${"kind".padEnd(kindWidth)}  ${"status".padEnd(statusWidth)}  ${"leased".padEnd(leaseWidth)}  note\n`,
-  );
+  const columns = (
+    ["credentialId", "fingerprint", "kind", "status", "leased", "note"] as const
+  ).map((name) => ({
+    name,
+    width: name === "note" ? 0 : Math.max(name.length, ...rows.map((row) => row[name].length)),
+  }));
+  process.stdout.write(`${columns.map(({ name, width }) => name.padEnd(width)).join("  ")}\n`);
   for (const row of rows) {
     process.stdout.write(
-      `${row.credentialId.padEnd(idWidth)}  ${row.fingerprint.padEnd(fingerprintWidth)}  ${row.kind.padEnd(kindWidth)}  ${row.status.padEnd(statusWidth)}  ${row.leased.padEnd(leaseWidth)}  ${row.note}\n`,
+      `${columns.map(({ name, width }) => row[name].padEnd(width)).join("  ")}\n`,
     );
   }
 }
@@ -870,6 +837,24 @@ function resolveQaReportOnlyOptionalScenarioNames(params: {
   return resolveQaReportOnlyOptionalScenarioNamesFromCatalog(readQaScenarioPack().scenarios);
 }
 
+async function setQaSuiteCommandExitCode(
+  summaryPath: string,
+  scenarioIds: readonly string[],
+  opts: Pick<QaSuiteCommandOptions, "allowFailures" | "explicitScenarioSelection">,
+) {
+  const allowFailures = opts.allowFailures === true;
+  const blockingScenarioCount = await readQaSuiteFailedOrSkippedScenarioCountFromFile(summaryPath, {
+    optionalScenarioNames: resolveQaReportOnlyOptionalScenarioNames({
+      scenarioIds,
+      explicitScenarioSelection: opts.explicitScenarioSelection,
+    }),
+    requireExecutedScenario: allowFailures,
+  });
+  if (!allowFailures && blockingScenarioCount > 0) {
+    process.exitCode = 1;
+  }
+}
+
 export async function runQaSuiteCommand(opts: QaSuiteCommandOptions) {
   const repoRoot = path.resolve(opts.repoRoot ?? process.cwd());
   const transportId = normalizeQaTransportId(opts.transportId);
@@ -1022,19 +1007,7 @@ export async function runQaSuiteCommand(opts: QaSuiteCommandOptions) {
     process.stdout.write(`QA Multipass summary: ${result.summaryPath}\n`);
     process.stdout.write(`QA Multipass host log: ${result.hostLogPath}\n`);
     process.stdout.write(`QA Multipass bootstrap log: ${result.bootstrapLogPath}\n`);
-    const blockingScenarioCount = await readQaSuiteFailedOrSkippedScenarioCountFromFile(
-      result.summaryPath,
-      {
-        optionalScenarioNames: resolveQaReportOnlyOptionalScenarioNames({
-          scenarioIds,
-          explicitScenarioSelection: opts.explicitScenarioSelection,
-        }),
-        requireExecutedScenario: allowFailures,
-      },
-    );
-    if (!allowFailures && blockingScenarioCount > 0) {
-      process.exitCode = 1;
-    }
+    await setQaSuiteCommandExitCode(result.summaryPath, scenarioIds, opts);
     return result;
   }
   const sutOpenClawCommand =
@@ -1115,19 +1088,7 @@ export async function runQaSuiteCommand(opts: QaSuiteCommandOptions) {
   process.stdout.write(`QA suite report: ${result.reportPath}\n`);
   process.stdout.write(`QA suite evidence: ${result.evidencePath}\n`);
   process.stdout.write(`QA suite summary: ${result.summaryPath}\n`);
-  const blockingScenarioCount = await readQaSuiteFailedOrSkippedScenarioCountFromFile(
-    result.summaryPath,
-    {
-      optionalScenarioNames: resolveQaReportOnlyOptionalScenarioNames({
-        scenarioIds,
-        explicitScenarioSelection: opts.explicitScenarioSelection,
-      }),
-      requireExecutedScenario: allowFailures,
-    },
-  );
-  if (!allowFailures && blockingScenarioCount > 0) {
-    process.exitCode = 1;
-  }
+  await setQaSuiteCommandExitCode(result.summaryPath, scenarioIds, opts);
   return {
     ...result,
     expectedCells: runtimeResult.expectedCells,
@@ -1444,10 +1405,12 @@ export async function runQaManualLaneCommand(opts: {
     opts.providerMode === undefined
       ? DEFAULT_QA_LIVE_PROVIDER_MODE
       : normalizeQaProviderMode(opts.providerMode);
-  const models = resolveQaManualLaneModels({
+  // `--model` is a one-model probe unless the operator also supplies `--alt-model`.
+  const primaryModel = opts.primaryModel?.trim();
+  const models = resolveQaRuntimeModelPair({
     providerMode,
-    primaryModel: opts.primaryModel,
-    alternateModel: opts.alternateModel,
+    primaryModel,
+    alternateModel: opts.alternateModel?.trim() || primaryModel,
   });
   const result = await runQaManualLane({
     repoRoot,

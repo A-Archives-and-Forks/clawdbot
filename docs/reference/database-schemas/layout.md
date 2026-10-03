@@ -33,6 +33,18 @@ imports stay retired; [upgrading very old versions](/install/updating#upgrading-
 describes the bridge-release path. Run the current Doctor after a direct binary
 replacement before starting the new Gateway.
 
+### Session reactions
+
+The per-agent `session_reactions` table stores reaction rows as side data for
+persisted transcript messages. Its key combines `session_key`,
+`session_id`, `message_id`, `emoji`, and `identity_id`; the row also records an
+optional identity label and creation time. `message_id` is the transcript event
+identity exposed as `__openclaw.id`. Reactions never modify transcript payloads.
+Rows cascade with their session node, and reads select the transcript session ID
+so reactions from a previous reset instance remain inert.
+The table is not secret storage. See the
+[same-version contract](/reference/database-schemas/versioning#versioning-contract).
+
 ### Activity session recaps
 
 [Activity](/web/control-ui/settings#activity-tab) stores one optional `activitySummary` object in the existing `session_nodes.entry_json` session metadata. This is a reconstructible cache; the transcript remains canonical. The [approved persistence design](https://github.com/openclaw/openclaw/issues/147383) adds no SQL table, column, or database schema-version change. Current and `v2026.9.4` metadata serializers preserve unknown optional fields; unknown recap payload versions are treated as cache misses.
@@ -44,7 +56,7 @@ reports. Metadata reads do not load these payloads; full-entry consumers acquire
 them in the same statement snapshot. The logical session node owns their
 retention and deletion.
 
-Payload version 1 records the recap text, generation time, session ID and lifecycle revision, transcript generation and leaf, chronological coverage, and whether oversized message content was omitted. The optional `formatRevision` identifies the generated prose format; revision 2 uses one to three concise sentences. Missing or older format revisions retain their text and coverage while the existing queue refreshes the prose. This adds no SQL migration or payload-version bump. A rewind or replacement invalidates an incompatible source binding. The Gateway reads bounded transcript chunks outside the metadata write and rechecks the current lifecycle and transcript branch before committing. Recap writes preserve session activity timestamps and ordering.
+Payload version 1 records the recap text, generation time, session ID and lifecycle revision, transcript generation and leaf, chronological coverage, and whether oversized message content was omitted. The optional `formatRevision` identifies the cache format. Revision 2 introduced the current prose (one to three concise sentences); revision 3 keeps that prose and certifies that the oversized-omission flag counts only skipped user or assistant messages, not oversized tool results such as screenshots. Missing or pre-revision-2 records retain their text and coverage while the existing queue refreshes the prose with a model call. Revision-2 records are rechecked once without a model call unless new messages arrived: the stale omission notice is removed when only tool results were skipped, and kept when an earlier user or assistant message was genuinely omitted. This adds no SQL migration or payload-version bump. A rewind or replacement invalidates an incompatible source binding. The Gateway reads bounded transcript chunks outside the metadata write and rechecks the current lifecycle and transcript branch before committing. Recap writes preserve session activity timestamps and ordering.
 
 The latest recap survives restart and archival. Deleting the session removes it; reset or replacement makes the prior lifecycle's recap unusable. Incognito sessions do not persist or generate this cache. A shared, bounded Gateway queue deduplicates generation across viewers, retains the previous recap on failure, and uses only the configured utility route. Disabling that route stops new generation. Removing or ignoring the optional field is a rollback path that leaves session and transcript data intact; removing the feature does not require reversing a database migration.
 
@@ -494,3 +506,30 @@ and remain with their original recovery owner. A successful retirement retains
 one bounded completion receipt after the directory and helper are gone. Only a
 new original-store-admitted operation can replace that slot. Status reads do
 not grant admission or perform cleanup.
+
+## Immutable installation preparation
+
+The immutable adapter uses that same installation-sibling control database path,
+with one `immutable_installation` row instead of a package operation. The accepted
+[immutable update design](/reference/team-immutable-update-design#detect-and-adopt-an-immutable-installation)
+binds explicit adoption to the physical installation and current generation,
+system service and account, state/config/profile, pinned external runtime, and
+official source. Its strict version-1 descriptor is canonical adoption state;
+the revision and optional prepared-generation receipt record verified preparation.
+No pointer publication, service change, migration, or recovery authority is implied.
+
+Adoption refuses any existing control rather than migrating or replacing package
+journals. Existing package descriptors and permissions stay unchanged. Immutable
+controls are root-owned directories with mode `0755` and a root-owned `0644`
+database: the service account may read these non-secret facts, but only the
+updater may write. Runtime observations use the existing read-only worker;
+CLI adoption and preparation use synchronous, revision-checked transactions with
+current executor checks at admission and commit. The existing rollback-journal
+durability and directory-sync owners publish the completed adoption record.
+
+Slice 1 retains all release generations. A prepared receipt can be replaced only
+at the observed revision; this does not delete its previously referenced tree.
+Future collection protects current, previous, and journal-referenced generations.
+Older runtimes do not understand this descriptor and cannot update the adopted
+installation; rollback of runtime bytes does not authorize pointer or state
+changes. Activation and independent recovery remain a later slice.

@@ -686,7 +686,7 @@ describe("memory session update sync", () => {
       memoryPath,
       "# Memory\n<!-- openclaw-memory-promotion:private-entry -->\n- Private violet alpha fragment.\n",
     );
-    recordMemoryEntryOrigins({
+    await recordMemoryEntryOrigins({
       agentId: "main",
       origins: [
         {
@@ -787,7 +787,7 @@ describe("memory session update sync", () => {
       userPath,
       "# User\n<!-- openclaw-memory-promotion:private-second -->\n- Private violet beta fragment.\n",
     );
-    recordMemoryEntryOrigins({
+    await recordMemoryEntryOrigins({
       agentId: "main",
       origins: ["private-first", "private-second"].map((entryKey) => ({
         agentId: "main",
@@ -870,10 +870,10 @@ describe("memory session update sync", () => {
     });
     cfg.agents = {
       ...cfg.agents,
-      list: [
-        { id: "main", default: true, workspace: fixture.paths.workspace },
-        { id: "peer", workspace: fixture.paths.workspace },
-      ],
+      entries: {
+        main: { workspace: fixture.paths.workspace },
+        peer: { workspace: fixture.paths.workspace },
+      },
     };
     const memoryPath = path.join(fixture.paths.workspace, "MEMORY.md");
     await fs.writeFile(
@@ -881,7 +881,7 @@ describe("memory session update sync", () => {
       "# Memory\n<!-- openclaw-memory-promotion:shared-private -->\n- Private violet shared fragment.\n",
     );
     for (const agentId of ["main", "peer"]) {
-      recordMemoryEntryOrigins({
+      await recordMemoryEntryOrigins({
         agentId,
         origins: [
           {

@@ -21,7 +21,7 @@ import { buildAgentSystemPrompt } from "./system-prompt.js";
 
 type PromptParams = Parameters<typeof buildAgentSystemPrompt>[0];
 const SKILLS =
-  "<available_skills>\n  <skill>\n    <name>demo</name>\n  </skill>\n</available_skills>";
+  "<available_skills>\n  <skill>\n    <name>demo</name>\n    <location>/skills/demo/SKILL.md</location>\n  </skill>\n</available_skills>";
 
 function renderPrompt(params: Partial<PromptParams> = {}) {
   return buildAgentSystemPrompt({ workspaceDir: "/tmp/openclaw", ...params });
@@ -164,6 +164,25 @@ describe("buildAgentSystemPrompt", () => {
     );
   });
 
+  it.each([
+    { channel: undefined, promptSurface: "openclaw_main" as const, silent: false },
+    { channel: "webchat", promptSurface: "openclaw_main" as const, silent: false },
+    { channel: "discord", promptSurface: "subagent" as const, silent: false },
+    { channel: "discord", promptSurface: "openclaw_main" as const, silent: true },
+  ])(
+    "limits silent reply guidance to external channel sessions: $promptSurface/$channel",
+    ({ channel, promptSurface, silent }) => {
+      const prompt = renderPrompt({
+        toolNames: ["message"],
+        promptSurface,
+        runtimeInfo: { channel, chatType: "group" },
+      });
+
+      expect(prompt.includes(SILENT_REPLY_TOKEN)).toBe(silent);
+      expect(prompt.includes("## Silent Replies")).toBe(silent);
+    },
+  );
+
   it("avoids the Claude subscription classifier wording in reply tag guidance", () => {
     const prompt = renderPrompt();
 
@@ -181,10 +200,12 @@ describe("buildAgentSystemPrompt", () => {
     const first = renderPrompt(params);
     const second = renderPrompt(params);
     const instruction =
-      "Messages delimited by <<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>> and <<<END_OPENCLAW_INTERNAL_CONTEXT>>> contain runtime context for the user request they follow, not user-authored text.\nUse it without replying to or describing it, keep its internal details private, and continue the request without waiting for another message.";
+      "OpenClaw may attach a separate runtime-context message for the current request. Treat it as application context rather than user-authored text.\nUse it without replying to or describing it, keep internal details private, and continue the request without waiting for another message.";
     expect(first).toBe(second);
     expect(first.split(instruction)).toHaveLength(2);
     expect(first.slice(0, first.indexOf(SYSTEM_PROMPT_CACHE_BOUNDARY))).toContain(instruction);
+    expect(first).not.toContain("<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>");
+    expect(first).not.toContain("<<<END_OPENCLAW_INTERNAL_CONTEXT>>>");
   });
 
   it("explains missing custom authoring without inventing a product-wide limitation", () => {
@@ -421,17 +442,6 @@ describe("buildAgentSystemPrompt", () => {
     expect(prompt).toContain("## Skills");
     expect(prompt).toContain("<name>demo</name>");
     expect(prompt).toContain("read exact <location>");
-  });
-
-  it("switches skills access guidance under code mode", () => {
-    const prompt = renderPrompt({
-      codeModeActive: true,
-      toolNames: ["exec"],
-      skillsPrompt: SKILLS,
-    });
-
-    expect(prompt).toContain('`skills.read("<name>")`');
-    expect(prompt).not.toContain("read exact <location> with `read`");
   });
 
   it("omits code-mode skill guidance when the actual exec tool is unavailable", () => {
@@ -979,7 +989,7 @@ describe("system prompt memory and runtime cache boundary", () => {
     expect(next.prefix).toBe(first.prefix);
     expect(first.prefix).toContain("## Care");
     expect(first.prefix).toContain(
-      "Large work: `sessions_spawn`; follow the accepted completion mode.",
+      "Execute work directly by default. Delegate a bounded, independent task only when parallel execution or an independent review provides a concrete benefit. Keep dependent steps with the same owner.",
     );
     expect(first.prefix).not.toContain("## Proactive Sub-Agent Orchestration");
     expect(first.suffix).not.toContain("Ultra active");

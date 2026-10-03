@@ -16,7 +16,10 @@ import {
   hydrateSidebarChildSessions,
   retireStaleChildSessionRows,
 } from "./app-sidebar-child-session-data.ts";
-import { SessionCatalogLiveState } from "./app-sidebar-session-catalog-live.ts";
+import {
+  SessionCatalogLiveState,
+  sessionCatalogListClient,
+} from "./app-sidebar-session-catalog-live.ts";
 import type {
   SidebarSessionMutationScope,
   SidebarSessionsScrollState,
@@ -25,6 +28,7 @@ import { createPanelRefreshStatus, type PanelRefreshStatus } from "./panel-refre
 import {
   applySessionCatalogContinuation,
   archiveSessionCatalog as archiveSessionCatalogData,
+  importSessionCatalog as importSessionCatalogData,
   applySessionCatalogHostEvent as applySessionCatalogHostEventToData,
   applySessionCatalogChanged as applySessionCatalogChangedToData,
   invalidateSessionCatalogs as invalidateSessionCatalogData,
@@ -132,14 +136,12 @@ export class SessionDataController implements ReactiveController, SessionCatalog
       },
     });
     this.subscriptions
-      .watch(
+      .watchStore(
         () => this.context?.gateway,
-        (gateway, notify) => gateway.subscribe(notify),
         (gateway) => this.synchronizeGateway(gateway),
       )
-      .watch(
+      .watchStore(
         () => this.context?.sessions,
-        (sessions, notify) => sessions.subscribe(notify),
         (sessions) => this.synchronizeSessions(sessions),
       )
       .effect(
@@ -154,9 +156,8 @@ export class SessionDataController implements ReactiveController, SessionCatalog
         () => this.context?.agents,
         (agents, notify) => subscribeSidebarAgentSessionCaches(agents, this, notify),
       )
-      .watch(
+      .watchStore(
         () => this.context?.agentSelection,
-        (agentSelection, notify) => agentSelection.subscribe(notify),
         () => this.synchronizeSessionScope(),
       );
   }
@@ -226,7 +227,7 @@ export class SessionDataController implements ReactiveController, SessionCatalog
   }
 
   sessionCatalogGatewayClient(): GatewayBrowserClient | null {
-    return this.gatewayClient;
+    return sessionCatalogListClient(this.context?.gateway.snapshot, this.host.connected);
   }
 
   private synchronizeOwnerSessionCounts(): void {
@@ -334,6 +335,8 @@ export class SessionDataController implements ReactiveController, SessionCatalog
 
   archiveSessionCatalog = archiveSessionCatalogData.bind(null, this);
 
+  importSessionCatalog = importSessionCatalogData.bind(null, this);
+
   refreshSessionCatalogs = (): Promise<void> => refreshSessionCatalogData(this);
 
   loadMoreSessionCatalog = (catalogId: string): Promise<void> =>
@@ -429,9 +432,10 @@ export class SessionDataController implements ReactiveController, SessionCatalog
     const available = isGatewayAvailable(gateway.snapshot);
     const becameAvailable = available && !this.gatewayAvailable;
     this.gatewayAvailable = available;
-    // Presence and auth snapshots must not retire this client's in-flight
-    // native or catalog pages unless its connection phase actually changes.
+    // Presence updates preserve in-flight pages, but a new authority projection
+    // can revoke catalog ownership without replacing the socket client.
     if (!sourceOrClientChanged && !connectionChanged) {
+      this.synchronizeSessionScope();
       this.synchronizeOwnerSessionCounts();
       const { awaitingGateway, error } = this.sessionCatalogRefreshStatus;
       const requesting = this.sessionCatalogLive.requestGeneration !== null;

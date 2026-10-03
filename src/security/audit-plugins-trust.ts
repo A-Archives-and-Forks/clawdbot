@@ -1,10 +1,9 @@
-// Audits installed plugins for trust, provenance, and filesystem risks.
 import path from "node:path";
 import { normalizeOptionalLowercaseString } from "@openclaw/normalization-core/string-coerce";
 import { listAgentEntries } from "../agents/agent-scope-config.js";
 import { resolveChannelAccount } from "../channels/account-resolution.js";
 import { listReadOnlyChannelPluginsForConfig } from "../channels/plugins/read-only.js";
-import type { ChannelPlugin } from "../channels/plugins/types.plugin.js";
+import type { AnyChannelPlugin as ChannelPlugin } from "../channels/plugins/types.plugin.js";
 import { inspectReadOnlyChannelAccount } from "../channels/read-only-account-inspect.js";
 import { resolveNativeSkillsEnabled } from "../config/commands.js";
 import type { OpenClawConfig } from "../config/config.js";

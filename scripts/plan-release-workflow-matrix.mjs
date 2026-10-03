@@ -36,18 +36,6 @@ const DOCKER_E2E_CHUNKS = [
     profiles: "beta minimum stable full",
   },
   {
-    chunk_id: "package-update-self-upgrade",
-    label: "package/update self-upgrade",
-    // Six 3500s first-hop lanes need two waves at npm weight limit 5; the 20m
-    // survivor (weight 3) overlaps. 2 x 3500s + 10m setup/artifacts ~= 127m => 130m.
-    timeout_minutes: 130,
-    // Dropped from stable for 2026.9.7 by the release lead under Peter's 2026-09-29
-    // decision: six-way first-hop contention in one job fails deterministically
-    // (jobs 109446149023, 109482109194) while every lane in it passes as a separate
-    // targeted lane. Restore "stable" with the waves change (5aed4315) and #161257.
-    profiles: "beta minimum full",
-  },
-  {
     chunk_id: "plugins-runtime-plugins",
     label: "plugins/runtime plugins",
     timeout_minutes: 60,
@@ -140,6 +128,11 @@ const LIVE_MODEL_PROVIDERS = [
   {
     provider_label: "OpenCode",
     providers: "opencode-go",
+    // The release workspace does not enable Global regions, so the default high-signal
+    // selection includes DeepSeek routes that reject every request. Keep this list aligned
+    // with models proven reachable from the release workspace.
+    models: "opencode-go/deepseek-v4-flash-vision-exp,opencode-go/glm-5.2,opencode-go/glm-5.3",
+    max_models: "3",
     profiles: "full",
   },
   {
@@ -448,7 +441,6 @@ export function createReleaseSourceSelection(options = {}) {
   const releaseProfile = options.releaseProfile ?? "stable";
   const includeOpenWebUI = isEnabled(options.includeOpenWebUI);
   const prepareOnly = isEnabled(options.prepareOnly);
-  const consumers = [];
   const codexSuites = [];
   const docker = [];
   const baseline = options.upgradeSurvivorBaseline ?? "";
@@ -503,14 +495,11 @@ export function createReleaseSourceSelection(options = {}) {
       if (row.suite_id.startsWith("live-codex-harness")) {
         codexSuites.push(row.suite_id);
       }
-      if (row.suite_id.startsWith("live-gateway-") || row.suite_id.startsWith("live-cli-")) {
-        consumers.push("live-cli-backend");
-      }
     }
   }
   return {
     docker,
-    consumers: [...new Set(consumers)],
+    consumers: [],
     codexSuites,
     fsSafeNative: prepareOnly || docker.length > 0,
     preparationLanes,

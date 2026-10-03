@@ -84,7 +84,7 @@ const AMBIGUOUS_QUOTED_SECRET_FIELD_REDACT_PATTERN = String.raw`(^|[\s,{])["']?(
 const AMBIGUOUS_QUOTED_AUTH_FIELD_REDACT_PATTERN = String.raw`(^|[\s,{])["']?(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|x-auth-token)["']?\s*[:=]\s*(["'])([^"'\r\n]+)\2`;
 // Pure-base64 prefixes require a non-alphanumeric boundary and skip explicit data-URL payloads.
 // Match the token first: the lookbehind rescans the whole base64 run, quadratic per `+`/`/`/`=`.
-export const BASE64_SAFE_TOKEN_BOUNDARY = String.raw`(^|[^A-Za-z0-9])`;
+const BASE64_SAFE_TOKEN_BOUNDARY = String.raw`(^|[^A-Za-z0-9])`;
 const base64SafeToken = (token: string) =>
   String.raw`${BASE64_SAFE_TOKEN_BOUNDARY}(?=${token})(?<!;base64,[A-Za-z0-9+/=]*)(${token})`;
 export const IDENTIFIER_SAFE_TOKEN_BOUNDARY = String.raw`(^|[^A-Za-z0-9_])`;
@@ -287,17 +287,19 @@ export const AWS_SECRET_ACCESS_KEY_MATCHER = Object.freeze({
 // the colon may include line breaks, as in the generic rule, so YAML explicit keys and indented
 // continuations stay covered. One forward pass classifies every key, so the cost is linear in the text
 // regardless of line length or key count.
-const BARE_PASS_KEY_PATTERN = String.raw`(?<![A-Za-z0-9])(pass|${CONFIG_COLON_ASSIGNMENT_SECRET_KEYS})\s*:\s*`;
-const BARE_PASS_VALUE_PATTERN = String.raw`[^\s#"'\x60<>]+`;
+const BARE_PASS_KEY_RE = new RegExp(
+  String.raw`(?<![A-Za-z0-9])(pass|${CONFIG_COLON_ASSIGNMENT_SECRET_KEYS})\s*:\s*`,
+  "gi",
+);
+const BARE_PASS_VALUE_RE = /[^\s#"'\x60<>]+/y;
 const ASCII_WORD_CHAR_RE = /[A-Za-z0-9]/;
 const INLINE_WHITESPACE_RE = /[ \t\r\n]/;
 
 function* matchBarePassAssignments(text: string): Iterable<RedactMatch> {
-  const keys = [...text.matchAll(new RegExp(BARE_PASS_KEY_PATTERN, "gi"))];
+  const keys = [...text.matchAll(BARE_PASS_KEY_RE)];
   if (keys.length === 0) {
     return;
   }
-  const valueRe = new RegExp(BARE_PASS_VALUE_PATTERN, "y");
   let next = 0;
   let assignmentSeen = false;
   for (let index = 0; index < text.length; index++) {
@@ -320,8 +322,8 @@ function* matchBarePassAssignments(text: string): Iterable<RedactMatch> {
         assignmentSeen = true;
         let end = index + key[0].length;
         if (!owned) {
-          valueRe.lastIndex = end;
-          const value = valueRe.exec(text)?.[0];
+          BARE_PASS_VALUE_RE.lastIndex = end;
+          const value = BARE_PASS_VALUE_RE.exec(text)?.[0];
           if (value) {
             end += value.length;
             yield { match: text.slice(index, end), groups: [value], input: text, offset: index };
@@ -390,16 +392,6 @@ export const SHELL_REFERENCE_PRESERVING_PATTERN_SOURCES = new Set([
   STANDALONE_ASSIGNMENT_QUOTED_REDACT_PATTERN,
   STANDALONE_ASSIGNMENT_REDACT_PATTERN,
 ]);
-export const CHUNK_UNSAFE_PATTERN_SOURCES = new Set([
-  TELEGRAM_BOT_TOKEN_REDACT_PATTERN,
-  TELEGRAM_TOKEN_REDACT_PATTERN,
-  AUTHORIZATION_BEARER_REDACT_PATTERN,
-  AUTHORIZATION_BASIC_REDACT_PATTERN,
-  AUTHORIZATION_BOT_REDACT_PATTERN,
-  STANDALONE_BEARER_REDACT_PATTERN,
-  ...HTTP_AUTH_HEADER_REDACT_PATTERNS,
-]);
-
 const DEFAULT_REDACT_FIELD_PATTERNS: readonly RedactPattern[] = [
   ENV_ASSIGNMENT_REDACT_PATTERN,
   ESCAPED_ENV_ASSIGNMENT_REDACT_PATTERN,
@@ -524,6 +516,17 @@ export const VENDOR_TOKEN_REDACT_PATTERNS: readonly string[] = [
   TELEGRAM_BOT_TOKEN_REDACT_PATTERN,
   TELEGRAM_TOKEN_REDACT_PATTERN,
 ];
+
+export const CHUNK_UNSAFE_PATTERN_SOURCES = new Set([
+  TELEGRAM_BOT_TOKEN_REDACT_PATTERN,
+  TELEGRAM_TOKEN_REDACT_PATTERN,
+  AUTHORIZATION_BEARER_REDACT_PATTERN,
+  AUTHORIZATION_BASIC_REDACT_PATTERN,
+  AUTHORIZATION_BOT_REDACT_PATTERN,
+  STANDALONE_BEARER_REDACT_PATTERN,
+  ...HTTP_AUTH_HEADER_REDACT_PATTERNS,
+  ...VENDOR_TOKEN_REDACT_PATTERNS.filter((source) => source.startsWith(BASE64_SAFE_TOKEN_BOUNDARY)),
+]);
 
 export const DEFAULT_REDACT_PATTERNS: readonly RedactPattern[] = [
   ...DEFAULT_REDACT_FIELD_PATTERNS,

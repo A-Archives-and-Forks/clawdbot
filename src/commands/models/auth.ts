@@ -156,13 +156,10 @@ async function readPipedStdin(): Promise<string> {
 
 async function readPastedSecret(params: {
   message: string;
-  masked: boolean;
   validate?: (value: string | undefined) => string | undefined;
 }): Promise<string> {
   const promptParams = { message: params.message, validate: params.validate };
-  const input = process.stdin.isTTY
-    ? await (params.masked ? password(promptParams) : text(promptParams))
-    : await readPipedStdin();
+  const input = process.stdin.isTTY ? await password(promptParams) : await readPipedStdin();
   const normalized = normalizeSecretInput(input);
   const validationMessage = params.validate?.(normalized);
   if (validationMessage) {
@@ -314,82 +311,39 @@ export function resolveRequestedLoginProviderOrThrow(
   );
 }
 
-function resolveTokenMethodOrThrow(
-  provider: ProviderPlugin,
-  rawMethod?: string,
-): ProviderAuthMethod | null {
-  const tokenMethods = listTokenAuthMethods(provider);
-  if (rawMethod?.trim()) {
-    const matched = pickAuthMethod(provider, rawMethod);
-    if (matched && matched.kind === "token") {
-      return matched;
-    }
-    const available = tokenMethods.map((method) => method.id).join(", ") || "(none)";
-    throw new Error(
-      `Unknown token auth method "${rawMethod}" for provider "${provider.id}". Available token methods: ${available}.`,
-    );
-  }
-  return null;
-}
-
 async function pickProviderAuthMethod(params: {
   provider: ProviderPlugin;
   requestedMethod?: string;
   prompter: WizardPrompter;
+  tokenOnly?: boolean;
 }) {
   const rawRequestedMethod = params.requestedMethod?.trim();
   if (rawRequestedMethod) {
     return pickAuthMethod(params.provider, rawRequestedMethod);
   }
-  const oauthMethod = params.provider.auth.find((method) => method.kind === "oauth");
-  if (oauthMethod) {
-    return oauthMethod;
-  }
-  if (params.provider.auth.length === 1) {
-    return params.provider.auth[0] ?? null;
-  }
-  return await params.prompter
-    .select({
-      message: `Auth method for ${params.provider.label}`,
-      options: params.provider.auth.map((method) => ({
-        value: method.id,
-        label: method.label,
-        hint: method.hint,
-      })),
-    })
-    .then((id) => params.provider.auth.find((method) => method.id === id) ?? null);
-}
-
-async function pickProviderTokenMethod(params: {
-  provider: ProviderPlugin;
-  requestedMethod?: string;
-  prompter: WizardPrompter;
-}) {
-  const explicitTokenMethod = resolveTokenMethodOrThrow(params.provider, params.requestedMethod);
-  if (explicitTokenMethod) {
-    return explicitTokenMethod;
-  }
-  const tokenMethods = listTokenAuthMethods(params.provider);
-  if (tokenMethods.length === 0) {
+  const methods = params.tokenOnly ? listTokenAuthMethods(params.provider) : params.provider.auth;
+  if (params.tokenOnly && methods.length === 0) {
     return null;
   }
-  const setupTokenMethod = tokenMethods.find((method) => method.id === "setup-token");
-  if (setupTokenMethod) {
-    return setupTokenMethod;
+  const preferred = methods.find((method) =>
+    params.tokenOnly ? method.id === "setup-token" : method.kind === "oauth",
+  );
+  if (preferred) {
+    return preferred;
   }
-  if (tokenMethods.length === 1) {
-    return tokenMethods[0] ?? null;
+  if (methods.length === 1) {
+    return methods[0] ?? null;
   }
-  return await params.prompter
+  return params.prompter
     .select({
-      message: `Token method for ${params.provider.label}`,
-      options: tokenMethods.map((method) => ({
+      message: `${params.tokenOnly ? "Token" : "Auth"} method for ${params.provider.label}`,
+      options: methods.map((method) => ({
         value: method.id,
         label: method.label,
         hint: method.hint,
       })),
     })
-    .then((id) => tokenMethods.find((method) => method.id === id) ?? null);
+    .then((id) => methods.find((method) => method.id === id) ?? null);
 }
 
 async function persistProviderAuthResult(params: {
@@ -737,7 +691,7 @@ export async function modelsAuthSetupTokenCommand(
   }
 
   const prompter = createClackPrompter();
-  const method = await pickProviderTokenMethod({ provider, prompter });
+  const method = await pickProviderAuthMethod({ provider, prompter, tokenOnly: true });
   if (!method) {
     throw new Error(`Provider "${provider.id}" does not expose a token auth method.`);
   }
@@ -790,7 +744,6 @@ export async function modelsAuthPasteTokenCommand(
   };
   const tokenInput = await readPastedSecret({
     message: `Paste token for ${provider}`,
-    masked: true,
     validate: validateTokenInput,
   });
   const token =
@@ -844,7 +797,6 @@ export async function modelsAuthPasteApiKeyCommand(
 
   const key = await readPastedSecret({
     message: `Paste API key for ${provider}`,
-    masked: true,
     validate: (value) => {
       const trimmed = value?.trim();
       if (!trimmed) {

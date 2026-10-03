@@ -1,4 +1,3 @@
-// Identifies wrapper commands that can carry hidden command payloads.
 import { splitShellArgs } from "../utils/shell-argv.js";
 import { normalizeExecutableToken } from "./exec-wrapper-tokens.js";
 import { parseInlineOptionToken } from "./inline-option-token.js";
@@ -120,14 +119,7 @@ function parseCarrierOptionToken(
       optionsWithValue.has(name) ||
       nonExecutingOptions.has(name)
     ) {
-      const parsedOption: ParsedCarrierOption = {
-        name,
-        hasInlineValue: option.hasInlineValue,
-      };
-      if (option.hasInlineValue) {
-        parsedOption.inlineValue = option.inlineValue;
-      }
-      return [parsedOption];
+      return [option];
     }
     return null;
   }
@@ -226,10 +218,7 @@ export function parseEnvInvocationPrelude(
     }
     if (isEnvAssignmentToken(token)) {
       usesModifiers = true;
-      const delimiter = token.indexOf("=");
-      if (delimiter > 0) {
-        assignmentKeys.push(token.slice(0, delimiter));
-      }
+      assignmentKeys.push(token.slice(0, token.indexOf("=")));
       continue;
     }
     if (token === "--" || token === "-") {

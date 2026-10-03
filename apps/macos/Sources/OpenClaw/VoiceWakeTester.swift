@@ -43,8 +43,7 @@ final class VoiceWakeTester {
         self.lastLoggedAt = nil
         self.lastTranscript = nil
         self.lastTranscriptAt = nil
-        self.silenceTask?.cancel()
-        self.silenceTask = nil
+        SimpleTaskSupport.stop(task: &self.silenceTask)
         self.currentTriggers = triggers
         let chosenLocale = localeID.flatMap { Locale(identifier: $0) } ?? Locale.current
         let recognizer = SFSpeechRecognizer(locale: chosenLocale)
@@ -195,8 +194,7 @@ final class VoiceWakeTester {
         self.lastLoggedAt = nil
         self.lastTranscript = nil
         self.lastTranscriptAt = nil
-        self.silenceTask?.cancel()
-        self.silenceTask = nil
+        SimpleTaskSupport.stop(task: &self.silenceTask)
         self.currentTriggers = []
     }
 
@@ -225,10 +223,10 @@ final class VoiceWakeTester {
             self.holdingAfterDetect = true
             let detectedText = match.command.isEmpty ? (match.trigger ?? text) : match.command
             self.logger.info("voice wake detected (test) (len=\(detectedText.count))")
-            await MainActor.run { AppStateStore.shared.startVoiceEars() }
+            await MainActor.run { AppStateStore.shared.earBoostActive = true }
             self.stop()
             await MainActor.run {
-                AppStateStore.shared.stopVoiceEars()
+                AppStateStore.shared.earBoostActive = false
                 onUpdate(.detected(detectedText))
             }
             return
@@ -340,10 +338,10 @@ final class VoiceWakeTester {
             self.holdingAfterDetect = true
             let detectedText = match.command.isEmpty ? (match.trigger ?? lastText) : match.command
             self.logger.info("voice wake detected (test, silence) (len=\(detectedText.count))")
-            await MainActor.run { AppStateStore.shared.startVoiceEars() }
+            await MainActor.run { AppStateStore.shared.earBoostActive = true }
             self.stop()
             await MainActor.run {
-                AppStateStore.shared.stopVoiceEars()
+                AppStateStore.shared.earBoostActive = false
                 onUpdate(.detected(detectedText))
             }
         }
@@ -357,6 +355,11 @@ final class VoiceWakeTester {
     }
 
     private nonisolated static func ensurePermissions() async throws -> Bool {
+        guard AppLaunchRuntimePlan.current.allowsActivation else {
+            let granted = PermissionManager.voiceWakePermissionsGranted()
+            if !granted { PermissionManager.reportDeferredRequest() }
+            return granted
+        }
         let speechStatus = SFSpeechRecognizer.authorizationStatus()
         if speechStatus == .notDetermined {
             let granted = await withCheckedContinuation { continuation in

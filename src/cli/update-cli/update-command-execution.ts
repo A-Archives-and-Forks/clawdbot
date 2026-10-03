@@ -1,12 +1,11 @@
 import path from "node:path";
 import { ScheduledTaskAutoStartRecoveryError } from "../../daemon/schtasks-update-recovery.js";
 import { tryReadJson } from "../../infra/json-files.js";
-import type { PackageUpdateTransaction } from "../../infra/package-update-steps.js";
+import type { PackageUpdateTransaction } from "../../infra/package-update-swap-contract.js";
 import type { UpdateStateSchemaVersion } from "../../infra/update-candidate-state.js";
 import type { UpdateDoctorConfigChange } from "../../infra/update-doctor-config.js";
 import { resolveUpdateFinalizationTimeoutMs } from "../../infra/update-finalization-budget.js";
 import { canResolveRegistryVersionForPackageTarget } from "../../infra/update-global.js";
-import { recordUpdateRunPhase } from "../../infra/update-run-ledger.js";
 import type { UpdateRunResult } from "../../infra/update-runner-types.js";
 import { hasCommandProcessCleanupError } from "../../process/exec-result.js";
 import { defaultRuntime } from "../../runtime.js";
@@ -35,7 +34,7 @@ import {
   inspectUpdateDatabaseContexts,
   revalidateUpdateDatabaseContexts,
 } from "./update-command-database-context.js";
-import { createUpdateCommandExecutionGuards } from "./update-command-execution-guards.js";
+import { preparePackageDoctorContext } from "./update-command-doctor-context.js";
 import type { MutableUpdateExecutionParams } from "./update-command-execution.types.js";
 import {
   admitSourceUpdateArtifacts,
@@ -57,7 +56,6 @@ import { observeOriginalManagedServiceRuntime } from "./update-command-original-
 import { createPackageUpdateActivationOptions } from "./update-command-package-activation.js";
 import {
   runPackageInstallUpdate,
-  preparePackageDoctorContext,
   type PackageInstallUpdateParams,
 } from "./update-command-package.js";
 import {
@@ -105,7 +103,8 @@ export async function executeMutableUpdate(
     onStateHandoff,
     admitExecutor,
     captureWriteOptions,
-  } = createUpdateCommandExecutionGuards(opts, params.root);
+    recordPhase,
+  } = params.executionGuards;
   let retentionInstallTarget = params.packageInstallTarget;
   const prepareMutableUpdate = async (env?: NodeJS.ProcessEnv, activationTimeoutMs?: number) => {
     assertExecutionCurrent();
@@ -241,7 +240,9 @@ export async function executeMutableUpdate(
           timeoutMs: updateStepTimeoutMs,
           phase,
           expectedService: admission?.services.get(mutationRoot),
-          updateRun: opts.run,
+          updateRun: originalRun,
+          recordPhase,
+          assertCurrent: assertExecutionCurrent,
           recovery: opts.recovery,
           onStopped: (state) => {
             preManagedServiceStop = { ...state, ...(serviceIdentity ? { serviceIdentity } : {}) };
@@ -374,9 +375,8 @@ export async function executeMutableUpdate(
   const validateCandidate = async (root: string) => {
     assertUpdateCommandRecovery(opts);
     const env = ownedManagedUpdateContext?.env ?? opts.run?.env ?? process.env;
-    if (opts.run) {
-      recordUpdateRunPhase(opts.run.runId, "validating", undefined, { env: opts.run.env });
-    }
+    await recordPhase("validating");
+    assertExecutionCurrent();
     try {
       if (params.updateInstallKind === "package") {
         // The staged manifest owns schema support, including artifacts without registry metadata.
@@ -397,7 +397,7 @@ export async function executeMutableUpdate(
       await assertUpdateCandidateExecutor({
         root,
         env,
-        opts,
+        run: originalRun,
         shouldRestart: params.shouldRestart,
         serviceOwned: preManagedServiceStop?.serviceUpdateVerdict?.kind === "owned",
         invocationCwd: params.invocationCwd,
@@ -526,9 +526,8 @@ export async function executeMutableUpdate(
       await parkForegroundUpdateForActivation(params, assertExecutionCurrent);
       await prepareMutableUpdate(env, activationTimeoutMs);
       assertExecutionCurrent();
-      if (opts.run) {
-        recordUpdateRunPhase(opts.run.runId, "activating", undefined, { env: opts.run.env });
-      }
+      await recordPhase("activating");
+      assertExecutionCurrent();
       const publication = {
         roots,
         env,
@@ -615,7 +614,7 @@ export async function executeMutableUpdate(
         beforeActivate,
         ...createPackageUpdateActivationOptions({
           run: opts.run,
-          nodeRunner: params.packageUpdateNodeRunner,
+          runtime: params.packageActivationRuntime,
           assertCurrent: assertExecutionCurrent,
         }),
         managedServiceEnv: preManagedServiceStop?.serviceEnv,
@@ -638,7 +637,8 @@ export async function executeMutableUpdate(
         devTarget: params.devTarget,
         inspectGitTarget: async (target, installTarget) => {
           retentionInstallTarget = installTarget;
-          recordInspectedGitTarget(opts.run, target, assertExecutionCurrent);
+          await recordInspectedGitTarget(target, recordPhase, assertExecutionCurrent);
+          assertExecutionCurrent();
           await recheckSchemas(target.schemaVersions);
           if (!gitContextPrepared) {
             await stopManagedServiceBeforeMutableUpdate(gitMutationRoots ?? undefined, "inspect");

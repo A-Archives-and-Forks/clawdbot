@@ -183,6 +183,8 @@ const qaScenarioGatewayRuntimeSchema = z.object({
   allowUnhealthyStartup: z.boolean().optional(),
   forwardHostHome: z.boolean().optional(),
   preserveDebugArtifacts: z.boolean().optional(),
+  // QA-only child-gateway knobs (for example diagnostic timing overrides).
+  env: z.record(z.string().regex(/^QA_[A-Z0-9_]+$/u), z.string()).optional(),
 });
 
 export const QA_RUNTIME_PAIR_LANES = ["core", "extended", "soak"] as const;
@@ -452,14 +454,6 @@ function readTextFile(relativePath: string): string {
   return fs.readFileSync(resolved, "utf8");
 }
 
-function parseQaYamlFileWithContext<T>(schema: z.ZodType<T>, relativePath: string): T {
-  return parseQaYamlWithContext(
-    schema,
-    YAML.parse(readTextFile(relativePath)) as unknown,
-    relativePath,
-  );
-}
-
 export function readQaScenarioPackYamlSource(): string {
   const chunks = [readTextFile(QA_SCENARIO_PACK_INDEX_PATH).trim()];
   for (const relativePath of listQaScenarioYamlPaths()) {
@@ -510,8 +504,8 @@ export function readQaScenarioPack(): QaScenarioPack {
   if (qaScenarioPackCache) {
     return qaScenarioPackCache;
   }
-  const packYaml = readTextFile(QA_SCENARIO_PACK_INDEX_PATH).trim();
-  if (!packYaml) {
+  const packYaml = readTextFile(QA_SCENARIO_PACK_INDEX_PATH);
+  if (!packYaml.trim()) {
     // The QA scenario pack is absent from some npm distributions. Return an
     // empty pack so completion cache updates and other consumers remain safe.
     qaScenarioPackCache = {
@@ -522,8 +516,9 @@ export function readQaScenarioPack(): QaScenarioPack {
     };
     return qaScenarioPackCache;
   }
-  const parsedPackFile = parseQaYamlFileWithContext(
+  const parsedPackFile = parseQaYamlWithContext(
     qaScenarioPackFileSchema,
+    YAML.parse(packYaml) as unknown,
     QA_SCENARIO_PACK_INDEX_PATH,
   );
   const scenarios = listQaScenarioYamlPaths().map((relativePath) => {

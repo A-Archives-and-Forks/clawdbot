@@ -50,7 +50,10 @@ export function readModelBehaviorConfig(
   return {
     thinkingLevel: typeof thinkingValue === "string" ? thinkingValue : undefined,
     thinkingOverridden: agentsDefaults !== null && Object.hasOwn(agentsDefaults, "thinkingDefault"),
-    fastMode: fastValue === "auto" || typeof fastValue === "boolean" ? fastValue : undefined,
+    fastMode:
+      fastValue === "auto" || fastValue === "ultrafast" || typeof fastValue === "boolean"
+        ? fastValue
+        : undefined,
     fastModeOverridden: agentsDefaults !== null && Object.hasOwn(agentsDefaults, "fastModeDefault"),
   };
 }
@@ -99,12 +102,6 @@ const PROBE_FAILURE_PRIORITY: readonly ModelsProbeResult["status"][] = [
   "no_model",
   "unknown",
 ];
-
-export function isMissingMethodError(error: unknown): boolean {
-  return /method (?:not found|not supported)|unknown method/iu.test(
-    modelProviderErrorMessage(error),
-  );
-}
 
 export function mergeProbeResults(cardId: string, results: ModelsProbeResult[]): ModelsProbeResult {
   if (results.length === 1) {

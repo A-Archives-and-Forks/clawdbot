@@ -1,4 +1,7 @@
 import "../../../styles/chat/composer-surface.css";
+import "../../../components/mcp-app-catalog.ts";
+import "../../../components/mcp-app-context-strip.ts";
+import "../../../components/mcp-app-resources.ts";
 import { truncateUtf16Safe } from "@openclaw/normalization-core/utf16-slice";
 import { html, nothing } from "lit";
 import { guard } from "lit/directives/guard.js";
@@ -8,7 +11,9 @@ import { ref } from "lit/directives/ref.js";
 import { icons } from "../../../components/icons.ts";
 import { renderSessionProgressCard } from "../../../components/session-progress-card.ts";
 import { t } from "../../../i18n/index.ts";
+import { clearCompositionEnd } from "../../../lib/ime.ts";
 import { detectTextDirection } from "../../../lib/text-direction.ts";
+import { presentedContent } from "../../../lit/presentation-binding.ts";
 import "../../../styles/chat/composer-context-strip.css";
 import type { ComposerDictationController } from "../composer-dictation.ts";
 import { insertComposerDictation } from "../composer-dictation.ts";
@@ -91,31 +96,19 @@ type ChatComposerViewContext = {
 };
 
 export function renderChatComposerQueue(props: ChatComposerProps, showAbortableUi: boolean) {
+  const canAct = props.connected && props.canSend && !props.submitDisabledReason;
   return renderChatQueue({
     queue: props.queue,
     displayQueue: props.displayQueue,
     offline: props.offline,
     canAbort: showAbortableUi,
-    canRemoveServerQueued: props.connected && props.canSend && !props.submitDisabledReason,
-    onQueueRetry:
-      props.connected && props.canSend && !props.submitDisabledReason
-        ? props.onQueueRetry
-        : undefined,
-    onQueueSteer:
-      props.connected && props.canSend && !props.submitDisabledReason
-        ? props.onQueueSteer
-        : undefined,
+    canRemoveServerQueued: canAct,
+    onQueueRetry: canAct ? props.onQueueRetry : undefined,
+    onQueueSteer: canAct ? props.onQueueSteer : undefined,
     // Reordering is local bookkeeping, so it stays available while offline —
     // exactly when a queue is long enough to need it.
     onQueueMove: props.onQueueMove,
-    onQueueEdit: props.queuedEdit?.onEdit,
-    onQueueEditChange: props.queuedEdit?.onEditChange,
-    onQueueEditSubmit: props.queuedEdit?.onEditSubmit,
-    onQueueEditCancel: props.queuedEdit?.onCancel,
-    editingId: props.queuedEdit?.editingId ?? null,
-    editingText: props.queuedEdit?.editingText,
-    editingMentions: props.queuedEdit?.editingMentions,
-    editingSource: props.queuedEdit?.source,
+    queuedEdit: props.queuedEdit,
     onQueueRemove: props.onQueueRemove,
   });
 }
@@ -341,6 +334,7 @@ export function renderChatComposerView(context: ChatComposerViewContext) {
             onManipulate: props.onProgressManipulate,
           },
           props.connected && props.canSend ? props.progressCardRefresh : undefined,
+          props.onClearSavedProgressCard,
         )}
       </div>`
     : props.progressCardInitialLoading
@@ -380,8 +374,9 @@ export function renderChatComposerView(context: ChatComposerViewContext) {
         </div>
         ${renderComposerQuestionDock(questionPanelProps)}
         ${props.disabledBanner?.kind === "above-composer" ? disabledBanner : nothing}
-        ${progressCard} ${queue} ${renderChatGoalRecovery(props.goalRecovery, props.connected)}
-        ${goalCard}
+        ${presentedContent(props.progressCardVisibility ?? true, progressCard)} ${queue}
+        ${renderChatGoalRecovery(props.goalRecovery, props.connected)} ${goalCard}
+        ${props.composerRecovery ?? nothing}
       </div>
       ${
         showComposerInput
@@ -421,6 +416,15 @@ export function renderChatComposerView(context: ChatComposerViewContext) {
                   : nothing
               }
               <div class="agent-chat__composer-lede">
+                <openclaw-mcp-app-catalog
+                  surface="thread"
+                  .sessionKey=${props.sessionKey}
+                  .agentId=${props.currentAgentId}
+                ></openclaw-mcp-app-catalog>
+                <openclaw-mcp-app-resources
+                  .sessionKey=${props.sessionKey}
+                  .agentId=${props.currentAgentId}
+                ></openclaw-mcp-app-resources>
                 ${goalComposer.render()}
                 ${renderSelectedHumanMentions(
                   visibleDraft,
@@ -463,6 +467,10 @@ export function renderChatComposerView(context: ChatComposerViewContext) {
                       `
                     : nothing
                 }
+                <openclaw-mcp-app-context-strip
+                  .sessionKey=${props.sessionKey}
+                  .agentId=${props.currentAgentId}
+                ></openclaw-mcp-app-context-strip>
                 ${renderAttachmentPreview(props)}
                 ${renderAttachmentReadStatus(props.getPendingAttachmentReads?.() ?? props.pendingAttachmentReads ?? 0)}
                 ${renderComposerDictationStatus(dictation)}
@@ -538,6 +546,7 @@ export function renderChatComposerView(context: ChatComposerViewContext) {
                     @focus=${handleSelect}
                     @pointerup=${handleSelect}
                     @keyup=${(event: KeyboardEvent) => {
+                      clearCompositionEnd(event);
                       state.emojiMenu.handleKeyup(event);
                       if (
                         event.key.startsWith("Arrow") ||

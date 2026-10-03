@@ -138,6 +138,14 @@ function requireBoundedString(value: unknown, label: string, maxBytes: number): 
   return value;
 }
 
+function optionalBoundedString(
+  value: unknown,
+  label: string,
+  maxBytes: number,
+): string | undefined {
+  return value === undefined ? undefined : requireBoundedString(value, label, maxBytes);
+}
+
 /** Claude CLI session ids are bounded, non-option argv values. */
 export function validateClaudeSessionId(value: unknown): string {
   const sessionId = requireBoundedString(value, "threadId", MAX_ARG_BYTES).trim();
@@ -164,37 +172,25 @@ function validateArgs(value: unknown): string[] {
     if (!VALUE_ARGS.has(name)) {
       throw new Error(`INVALID_REQUEST: unsupported Claude CLI argument: ${arg || "<empty>"}`);
     }
-    if (equalsIndex > 0) {
-      const inlineValue = arg.slice(equalsIndex + 1);
-      if (!inlineValue || inlineValue.startsWith("-")) {
-        throw new Error(
-          `INVALID_REQUEST: Claude CLI argument requires a non-option value: ${name}`,
-        );
-      }
-      if (name === "--permission-mode" && inlineValue === "bypassPermissions") {
-        throw new Error("INVALID_REQUEST: bypassPermissions is not allowed for node agent runs");
-      }
-      continue;
-    }
-    if (index + 1 >= args.length) {
+    if (equalsIndex < 0 && index + 1 >= args.length) {
       throw new Error(`INVALID_REQUEST: Claude CLI argument requires a value: ${name}`);
     }
-    if (args[index + 1]?.startsWith("-")) {
+    const argumentValue = equalsIndex > 0 ? arg.slice(equalsIndex + 1) : args[++index]!;
+    if ((equalsIndex > 0 && !argumentValue) || argumentValue.startsWith("-")) {
       throw new Error(`INVALID_REQUEST: Claude CLI argument requires a non-option value: ${name}`);
     }
-    if (name === "--permission-mode" && args[index + 1] === "bypassPermissions") {
+    if (name === "--permission-mode" && argumentValue === "bypassPermissions") {
       throw new Error("INVALID_REQUEST: bypassPermissions is not allowed for node agent runs");
     }
-    index += 1;
   }
   return args;
 }
 
 function validateTimeout(value: unknown, label: string, min: number, max: number): number {
-  if (!Number.isInteger(value) || (value as number) < min || (value as number) > max) {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
     throw new Error(`INVALID_REQUEST: ${label} must be an integer from ${min} to ${max}`);
   }
-  return value as number;
+  return value;
 }
 
 /** Select framing before the command handler validates the complete narrow request. */
@@ -243,23 +239,11 @@ export async function decodeClaudeCliNodeRunParams(
   if (value.skillRuntime !== undefined && value.skillRuntime !== true) {
     throw new Error("INVALID_REQUEST: skillRuntime must be true when supplied");
   }
-  const stdin =
-    value.stdin === undefined
-      ? undefined
-      : requireBoundedString(value.stdin, "stdin", MAX_REQUEST_BYTES);
-  const systemPrompt =
-    value.systemPrompt === undefined
-      ? undefined
-      : requireBoundedString(value.systemPrompt, "systemPrompt", MAX_REQUEST_BYTES);
-  const agentId =
-    value.agentId === undefined
-      ? undefined
-      : requireBoundedString(value.agentId, "agentId", MAX_ARG_BYTES);
-  const sessionKey =
-    value.sessionKey === undefined
-      ? undefined
-      : requireBoundedString(value.sessionKey, "sessionKey", MAX_ARG_BYTES);
-  const approvalDecision =
+  const stdin = optionalBoundedString(value.stdin, "stdin", MAX_REQUEST_BYTES);
+  const systemPrompt = optionalBoundedString(value.systemPrompt, "systemPrompt", MAX_REQUEST_BYTES);
+  const agentId = optionalBoundedString(value.agentId, "agentId", MAX_ARG_BYTES);
+  const sessionKey = optionalBoundedString(value.sessionKey, "sessionKey", MAX_ARG_BYTES);
+  const approvalDecision: "allow-once" | "allow-always" | undefined =
     value.approvalDecision === "allow-once" || value.approvalDecision === "allow-always"
       ? value.approvalDecision
       : undefined;
@@ -271,8 +255,7 @@ export async function decodeClaudeCliNodeRunParams(
   if (value.systemRunPlan !== undefined && !systemRunPlan) {
     throw new Error("INVALID_REQUEST: systemRunPlan must be an object");
   }
-  const cwd =
-    value.cwd === undefined ? undefined : requireBoundedString(value.cwd, "cwd", MAX_ARG_BYTES);
+  const cwd = optionalBoundedString(value.cwd, "cwd", MAX_ARG_BYTES);
   if (cwd) {
     const stat = await fs.stat(cwd).catch(() => undefined);
     if (!stat?.isDirectory()) {

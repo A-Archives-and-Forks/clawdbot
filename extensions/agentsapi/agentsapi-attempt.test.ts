@@ -1,12 +1,11 @@
 import path from "node:path";
-import type { AgentSession } from "openai/resources/beta/agents/agents";
-import type { Turn } from "openai/resources/beta/agents/sessions/turns";
 import {
   queueAgentHarnessMessage,
   type AgentHarnessAttemptParamsV2,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { AuthStorage, ModelRegistry, SessionManager } from "openclaw/plugin-sdk/agent-sessions";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
+import { saveMediaBuffer } from "openclaw/plugin-sdk/media-store";
 import {
   createMockPluginRegistry,
   initializeGlobalHookRunner,
@@ -14,12 +13,13 @@ import {
   resetGlobalHookRunner,
 } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { upsertSessionEntry } from "openclaw/plugin-sdk/session-store-runtime";
-import { closeOpenClawAgentDatabasesForTest } from "openclaw/plugin-sdk/sqlite-runtime-testing";
-import { useAutoCleanupTempDirTracker } from "openclaw/plugin-sdk/test-env";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useSessionStoreTempDirs } from "openclaw/plugin-sdk/sqlite-runtime-testing";
+import { withOpenClawTestState } from "openclaw/plugin-sdk/test-state";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runAgentsApiAttempt, type AgentsApiPromptHistories } from "./agentsapi-attempt.js";
 import type { AgentsApiBinding } from "./agentsapi-bindings.js";
 import { AgentsApiClient, type AgentsApiItem } from "./agentsapi-client.js";
+import { createHostedSession, createModel, createTurn } from "./agentsapi.test-support.js";
 
 const { createSession, registerRun } = vi.hoisted(() => ({
   createSession: vi.fn<typeof import("./agentsapi-session.js").createAgentsApiSession>(),
@@ -39,7 +39,7 @@ vi.mock("openclaw/plugin-sdk/agent-harness-runtime", async (importOriginal) => {
   };
 });
 
-const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+const tempDirs = useSessionStoreTempDirs(afterAll, "agentsapi-completed-reply-");
 
 beforeEach(() => {
   vi.spyOn(AgentsApiClient.prototype, "create").mockResolvedValue("session-fixture");
@@ -70,7 +70,6 @@ afterEach(() => {
   createSession.mockReset();
   registerRun.mockReset();
   resetGlobalHookRunner();
-  closeOpenClawAgentDatabasesForTest();
 });
 
 describe("Agents API completed reply settlement", () => {
@@ -132,6 +131,99 @@ describe("Agents API completed reply settlement", () => {
       ).toEqual([]);
     },
   );
+});
+
+it("leaves PDF steering uncommitted so its next turn transfers the original in the same session", async () => {
+  await withOpenClawTestState({ label: "agentsapi-pdf-steering" }, async () => {
+    const fixture = await createAttempt();
+    const bytes = Buffer.from("%PDF-1.4\nThe launch window is October.\n%%EOF\n");
+    const saved = await saveMediaBuffer(bytes, "application/pdf", "inbound");
+    const media = [
+      { url: `media://inbound/${saved.id}`, contentType: "application/pdf", fileName: "brief.pdf" },
+    ];
+    const prompt = "Read the attached brief.";
+    const createRecorder = await loadUserTurnTranscriptRecorderFactoryForTest();
+    const recorder = createRecorder({
+      target: fixture.target,
+      input: { text: prompt, media, idempotencyKey: "pdf-followup" },
+    });
+    vi.spyOn(AgentsApiClient.prototype, "setReasoningEffort").mockResolvedValue();
+    vi.spyOn(AgentsApiClient.prototype, "artifacts").mockResolvedValue([]);
+    const upload = vi
+      .spyOn(AgentsApiClient.prototype, "uploadFile")
+      .mockResolvedValue({ status: "uploaded" });
+    const started = createDeferred<void>();
+    const finish = createDeferred<void>();
+    const submitted: string[] = [];
+    let firstTurn = true;
+    createSession.mockImplementation((options) => {
+      const activeTurn = firstTurn;
+      firstTurn = false;
+      return {
+        isAvailable: () => true,
+        isSettled: () => false,
+        wasSubmitted: () => true,
+        queueMessage: async (_text, persistInput) => {
+          await persistInput?.();
+        },
+        readUsageTurns: async () => [completedTurn],
+        run: async (text, persistInput, onSubmitted) => {
+          await persistInput();
+          onSubmitted();
+          submitted.push(text);
+          if (activeTurn) {
+            started.resolve();
+            await finish.promise;
+          }
+          options.onSettled?.();
+          return { turn: completedTurn, cancelled: false, terminatedByTool: false };
+        },
+        close: async () => {},
+        reconcileAfterClose: async () => completedTurn,
+      };
+    });
+    const first = fixture.run();
+    try {
+      await Promise.race([
+        started.promise,
+        first.then((result) => {
+          throw new Error("Agents API attempt settled before native start", {
+            cause: result.terminal,
+          });
+        }),
+      ]);
+      const handle = registerRun.mock.calls.at(-1)?.[1];
+      if (!handle?.queueMessage) {
+        throw new Error("Expected the registered Agents API run");
+      }
+      await expect(
+        handle.queueMessage(prompt, { media, userTurnTranscriptRecorder: recorder }),
+      ).rejects.toThrow("Agents API attachments require a separate turn");
+      expect(recorder.hasPersisted()).toBe(false);
+    } finally {
+      finish.resolve();
+      await first;
+    }
+    expect((await first).terminal).toEqual({ kind: "ok" });
+
+    fixture.params.runId = "pdf-followup-run";
+    fixture.params.prompt = prompt;
+    fixture.params.media = media;
+    fixture.params.userTurnTranscriptRecorder = recorder;
+    expect((await fixture.run()).terminal).toEqual({ kind: "ok" });
+    expect(recorder.hasPersisted()).toBe(true);
+    expect(createSession.mock.calls.map(([options]) => options.sessionId)).toEqual([
+      "session-fixture",
+      "session-fixture",
+    ]);
+    expect(upload).toHaveBeenCalledTimes(1);
+    const file = upload.mock.calls[0]![1];
+    expect(Buffer.from(file.data, "base64")).toEqual(bytes);
+    expect(submitted[1]).toContain(prompt);
+    expect(submitted[1]).toContain(
+      JSON.stringify([{ attachment: 1, name: "brief.pdf", path: file.path }]),
+    );
+  });
 });
 
 describe("Agents API retry prompt history", () => {
@@ -316,7 +408,7 @@ describe("Agents API retry prompt history", () => {
 });
 
 async function createAttempt() {
-  const workspaceDir = tempDirs.make("agentsapi-completed-reply-");
+  const workspaceDir = tempDirs.make();
   const target = {
     agentId: "main",
     sessionId: "artifact-reply",
@@ -352,18 +444,7 @@ async function createAttempt() {
     abortSignal: controller.signal,
     provider: "openai",
     modelId: "fixture-model",
-    model: {
-      id: "fixture-model",
-      name: "Fixture Model",
-      api: "openai-responses",
-      provider: "openai",
-      baseUrl: "https://api.openai.com/v1",
-      reasoning: false,
-      input: ["text"],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: 1024,
-      maxTokens: 512,
-    },
+    model: createModel(),
     resolvedApiKey: "fixture-not-a-real-api-key",
     authStorage,
     modelRegistry: ModelRegistry.inMemory(authStorage),
@@ -409,19 +490,7 @@ async function createAttempt() {
   };
 }
 
-const completedTurn: Turn = {
-  id: "turn-fixture",
-  agent_id: "agent-fixture",
-  session_id: "session-fixture",
-  object: "agent.session.turn",
-  created_at: 1,
-  started_at: 1,
-  completed_at: 2,
-  status: "completed",
-  subagent_id: null,
-  error: null,
-  usage: null,
-};
+const completedTurn = createTurn();
 
 const completedItem: AgentsApiItem = {
   id: "answer-fixture",
@@ -433,36 +502,4 @@ const completedItem: AgentsApiItem = {
   content: [{ type: "output_text", text: "The completed answer." }],
 };
 
-const hostedSession: AgentSession = {
-  id: "session-fixture",
-  agent: {
-    id: "agent-fixture",
-    instructions: "Fixture instructions",
-    model: "fixture-model",
-    multi_agent: { enabled: false, max_concurrent_subagents: null },
-    name: null,
-    reasoning: { effort: null, summary: null },
-    service_tier: "auto",
-    text: { format: { type: "text" }, verbosity: "medium" },
-    tools: [],
-  },
-  created_at: 1,
-  environment: {
-    id: "environment-fixture",
-    capability_directories: [],
-    files: [],
-    network: { access: "disabled", allowed_domains: [] },
-    packages: { npm: [], python: [], system: [] },
-    plugins: [],
-    skills: [],
-    type: "openai_hosted",
-  },
-  error: null,
-  last_active_at: 2,
-  metadata: {},
-  object: "agent.session",
-  required_actions: [],
-  status: "idle",
-  usage: null,
-  vault_ids: [],
-};
+const hostedSession = createHostedSession();

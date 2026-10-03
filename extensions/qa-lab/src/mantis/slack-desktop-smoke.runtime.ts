@@ -1,5 +1,6 @@
 import path from "node:path";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
+import { normalizeOptionalString as trimToValue } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { ensureRepoBoundDirectory, resolveRepoRelativeOutputDir } from "../cli-paths.js";
 import { toQaError } from "../errors.js";
 import {
@@ -7,7 +8,6 @@ import {
   startQaCredentialLeaseHeartbeat,
 } from "../live-transports/shared/credential-lease.runtime.js";
 import { resolveLiveTransportQaScenarioIds } from "../live-transports/shared/scenario-selection.js";
-import { trimToValue } from "../mantis-options.runtime.js";
 import { createPhaseTimer, type MantisPhaseTimings } from "../mantis-phase-timer.runtime.js";
 import {
   copyCrabboxArtifacts,
@@ -19,7 +19,6 @@ import {
   renderMantisDesktopRecordingScript,
   resolveMantisCrabboxLeaseOptions,
   type MantisCrabboxLeaseOptions,
-  runCommand,
   shellQuote,
 } from "./crabbox-runtime.js";
 import {
@@ -170,35 +169,18 @@ function resolveScenarioIds(params: {
 }
 
 function buildCrabboxEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const next = {
-    ...env,
-  };
-  if (!trimToValue(next.OPENCLAW_LIVE_OPENAI_KEY) && trimToValue(next.OPENAI_API_KEY)) {
-    next.OPENCLAW_LIVE_OPENAI_KEY = next.OPENAI_API_KEY;
-  }
-  if (!trimToValue(next.OPENCLAW_MANTIS_SLACK_BOT_TOKEN) && trimToValue(next.SLACK_BOT_TOKEN)) {
-    next.OPENCLAW_MANTIS_SLACK_BOT_TOKEN = next.SLACK_BOT_TOKEN;
-  }
-  if (
-    !trimToValue(next.OPENCLAW_MANTIS_SLACK_BOT_TOKEN) &&
-    trimToValue(next.OPENCLAW_QA_SLACK_SUT_BOT_TOKEN)
-  ) {
-    next.OPENCLAW_MANTIS_SLACK_BOT_TOKEN = next.OPENCLAW_QA_SLACK_SUT_BOT_TOKEN;
-  }
-  if (!trimToValue(next.OPENCLAW_MANTIS_SLACK_APP_TOKEN) && trimToValue(next.SLACK_APP_TOKEN)) {
-    next.OPENCLAW_MANTIS_SLACK_APP_TOKEN = next.SLACK_APP_TOKEN;
-  }
-  if (
-    !trimToValue(next.OPENCLAW_MANTIS_SLACK_APP_TOKEN) &&
-    trimToValue(next.OPENCLAW_QA_SLACK_SUT_APP_TOKEN)
-  ) {
-    next.OPENCLAW_MANTIS_SLACK_APP_TOKEN = next.OPENCLAW_QA_SLACK_SUT_APP_TOKEN;
-  }
-  if (
-    !trimToValue(next.OPENCLAW_MANTIS_SLACK_CHANNEL_ID) &&
-    trimToValue(next.OPENCLAW_QA_SLACK_CHANNEL_ID)
-  ) {
-    next.OPENCLAW_MANTIS_SLACK_CHANNEL_ID = next.OPENCLAW_QA_SLACK_CHANNEL_ID;
+  const next = { ...env };
+  for (const [target, source] of [
+    ["OPENCLAW_LIVE_OPENAI_KEY", "OPENAI_API_KEY"],
+    ["OPENCLAW_MANTIS_SLACK_BOT_TOKEN", "SLACK_BOT_TOKEN"],
+    ["OPENCLAW_MANTIS_SLACK_BOT_TOKEN", "OPENCLAW_QA_SLACK_SUT_BOT_TOKEN"],
+    ["OPENCLAW_MANTIS_SLACK_APP_TOKEN", "SLACK_APP_TOKEN"],
+    ["OPENCLAW_MANTIS_SLACK_APP_TOKEN", "OPENCLAW_QA_SLACK_SUT_APP_TOKEN"],
+    ["OPENCLAW_MANTIS_SLACK_CHANNEL_ID", "OPENCLAW_QA_SLACK_CHANNEL_ID"],
+  ] as const) {
+    if (!trimToValue(next[target]) && trimToValue(next[source])) {
+      next[target] = next[source];
+    }
   }
   return next;
 }
@@ -224,12 +206,9 @@ function parseSlackGatewayCredentialPayload(payload: unknown): SlackGatewayCrede
     throw new Error("Slack credential payload must be an object.");
   }
   const candidate = payload as Record<string, unknown>;
-  const channelId =
-    typeof candidate.channelId === "string" ? trimToValue(candidate.channelId) : undefined;
-  const sutBotToken =
-    typeof candidate.sutBotToken === "string" ? trimToValue(candidate.sutBotToken) : undefined;
-  const sutAppToken =
-    typeof candidate.sutAppToken === "string" ? trimToValue(candidate.sutAppToken) : undefined;
+  const channelId = trimToValue(candidate.channelId);
+  const sutBotToken = trimToValue(candidate.sutBotToken);
+  const sutAppToken = trimToValue(candidate.sutAppToken);
   if (!channelId || !sutBotToken || !sutAppToken) {
     throw new Error(
       "Slack credential payload must include channelId, sutBotToken, and sutAppToken.",
@@ -1068,49 +1047,48 @@ export async function runMantisSlackDesktopSmoke(
     let remoteRunError: unknown;
     const remoteRunStartedAt = new Date();
     const freshPrArgs = freshPr ? ["--fresh-pr", freshPr] : [];
-    await runCommand({
-      command: crabboxBin,
-      args: [
-        "run",
-        "--provider",
-        provider,
-        "--id",
-        resolvedLeaseId,
-        "--desktop",
-        "--browser",
-        "--no-hydrate",
-        ...freshPrArgs,
-        "--shell",
-        "--",
-        renderRemoteScript({
-          alternateModel,
-          approvalCheckpoints,
-          credentialRole,
-          credentialSource,
-          fastMode,
-          hydrateMode,
-          primaryModel,
-          providerMode,
-          remoteOutputDir,
-          scenarioIds,
-          setupGateway: gatewaySetup,
-          slackChannelId,
-          slackUrl,
-        }),
-      ],
-      cwd: repoRoot,
-      env,
-      runner,
-      stdio: "inherit",
-    }).then(
-      () => {
-        timer.recordPhase("crabbox.remote_run", remoteRunStartedAt, "pass");
-      },
-      (error: unknown) => {
-        timer.recordPhase("crabbox.remote_run", remoteRunStartedAt, "fail");
-        remoteRunError = error;
-      },
-    );
+    try {
+      await runner(
+        crabboxBin,
+        [
+          "run",
+          "--provider",
+          provider,
+          "--id",
+          resolvedLeaseId,
+          "--desktop",
+          "--browser",
+          "--no-hydrate",
+          ...freshPrArgs,
+          "--shell",
+          "--",
+          renderRemoteScript({
+            alternateModel,
+            approvalCheckpoints,
+            credentialRole,
+            credentialSource,
+            fastMode,
+            hydrateMode,
+            primaryModel,
+            providerMode,
+            remoteOutputDir,
+            scenarioIds,
+            setupGateway: gatewaySetup,
+            slackChannelId,
+            slackUrl,
+          }),
+        ],
+        {
+          cwd: repoRoot,
+          env,
+          stdio: "inherit",
+        },
+      );
+      timer.recordPhase("crabbox.remote_run", remoteRunStartedAt, "pass");
+    } catch (error) {
+      timer.recordPhase("crabbox.remote_run", remoteRunStartedAt, "fail");
+      remoteRunError = error;
+    }
     leaseHeartbeat?.throwIfFailed();
     await timer.timePhase("artifacts.copy", () =>
       copyCrabboxArtifacts({

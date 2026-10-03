@@ -21,9 +21,11 @@ import {
   formatCollapsedToolPreviewText,
   formatCollapsedToolSummaryText,
   resolveCollapsedToolArgumentPreview as toolArgumentPreview,
+  resolveToolCardDisplay,
   resolveToolCardOutcome,
 } from "../../../lib/chat/tool-cards.ts";
 import { resolveToolDisplay } from "../../../lib/chat/tool-display.ts";
+import { pathDisplayName } from "../../../lib/path-display.ts";
 import { renderPluginSurface } from "../../../plugins/control-ui-view.ts";
 import type { WorkGroupRenderItem } from "../chat-thread-grouping.ts";
 import type { PluginToolIcons } from "../chat-tool-icon-controller.ts";
@@ -192,7 +194,7 @@ function compactToolTarget(target: string, kind: ToolCallView["kind"]): string {
   if (kind !== "edit" && kind !== "write") {
     return target;
   }
-  return target.split(/[\\/]/u).findLast(Boolean) ?? target;
+  return pathDisplayName(target);
 }
 
 export function syncToolDisclosureOverflow(event: Event): void {
@@ -211,6 +213,7 @@ function renderToolRowContent(
   card: ToolCard,
   view: ToolCallView,
   outcome: ToolCardOutcome,
+  toolLabel: string,
   workspaceFilePath: string | null,
   onOpenWorkspaceFile?: (target: { path: string; line?: number | null }) => void,
 ) {
@@ -267,7 +270,7 @@ function renderToolRowContent(
   const displayLabel = formatCollapsedToolSummaryText(summary.label) ?? summary.label;
   const displayName = distinctSummaryText(summary.name, displayLabel);
   return html`
-    <span class="chat-tool-msg-summary__label">${displayLabel}</span>
+    ${!displayName || summary.label !== toolLabel ? html`<span class="chat-tool-msg-summary__label">${displayLabel}</span>` : nothing}
     ${
       displayName ? html`<span class="chat-tool-msg-summary__names">${displayName}</span>` : nothing
     }
@@ -419,7 +422,7 @@ export function renderToolApprovalReviews(card: ToolCard) {
 }
 
 export function renderToolCard(
-  card: ToolCard,
+  originalCard: ToolCard,
   opts: ToolRenderOptions & {
     expanded: boolean;
     onToggleExpanded: (id: string) => void;
@@ -428,10 +431,11 @@ export function renderToolCard(
     activityCards?: readonly ToolCard[];
   },
 ) {
+  const card = resolveToolCardDisplay(originalCard);
   const outcome = resolveToolCardOutcome(card, opts.runActive);
   const progressReceipt = renderProgressCardReceipt(card, outcome);
   if (progressReceipt && !opts.children) {
-    return renderPluginToolResult(card, opts, progressReceipt);
+    return renderPluginToolResult(originalCard, opts, progressReceipt);
   }
   const view = resolveToolCallView({ name: card.name, args: card.args, details: card.details });
   const display = resolveToolDisplay({ name: card.name, args: card.args, detailMode: "explain" });
@@ -444,7 +448,11 @@ export function renderToolCard(
   const workspaceFilePath = toolWorkspacePath(card, view);
   const isFileRow = Boolean(workspaceFilePath);
   const rowContent = html`
-    <span class="chat-tool-msg-summary__icon"
+    <span
+      class="chat-tool-msg-summary__icon"
+      role="img"
+      aria-label=${display.name}
+      title=${display.name}
       >${renderToolIcon(icon, { toolName: display.name, pluginToolIcons: opts.pluginToolIcons })}</span
     >
     <span class="chat-tool-disclosure__content"
@@ -452,6 +460,7 @@ export function renderToolCard(
         card,
         view,
         outcome,
+        display.label,
         workspaceFilePath,
         opts.onOpenWorkspaceFile,
       )}</span
@@ -460,8 +469,9 @@ export function renderToolCard(
     <span class="chat-tool-row__chevron" aria-hidden="true">${icons.chevronRight}</span>
   `;
 
+  // Plugin replacements receive the raw invocation, paired with its own output.
   return renderPluginToolResult(
-    card,
+    originalCard,
     opts,
     html`
       <div
@@ -506,12 +516,12 @@ export function renderToolCard(
                   <details class="chat-tool-wrapper-details">
                     <summary>${t("chat.toolCards.toolInput")}</summary>
                     <div class="chat-tool-msg-body">
-                      ${renderExpandedToolCardContent(card, opts)}
+                      ${renderExpandedToolCardContent(originalCard, opts)}
                     </div>
                   </details>
                 </div>`
               : html`<div class="chat-tool-msg-body">
-                  ${renderExpandedToolCardContent(card, opts)}
+                  ${renderExpandedToolCardContent(originalCard, opts)}
                 </div>`
             : nothing
         }

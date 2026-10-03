@@ -4,6 +4,7 @@ import { emitAgentHarnessAttemptEvent } from "openclaw/plugin-sdk/agent-harness-
 import {
   awaitAgentEndSideEffects,
   embeddedAgentLog,
+  formatErrorMessage,
   runAgentEndSideEffects,
   type EmbeddedRunAttemptParamsV2 as EmbeddedRunAttemptParams,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
@@ -35,8 +36,9 @@ export function withCodexAppServerFastModeServiceTier(
   configuredAppServer: Pick<CodexAppServerRuntimeOptions, "serviceTier"> = appServer,
 ): CodexAppServerRuntimeOptions {
   const fastMode = typeof params.fastMode === "function" ? params.fastMode() : params.fastMode;
+  // Ultrafast starts from Fast; the actual turn revalidates native account/model access.
   const serviceTier =
-    fastMode === undefined ? configuredAppServer.serviceTier : fastMode ? "priority" : undefined;
+    fastMode === undefined ? configuredAppServer.serviceTier : fastMode ? "priority" : null;
   if (serviceTier === appServer.serviceTier) {
     return appServer;
   }
@@ -86,4 +88,20 @@ export async function runCodexAgentEndHook(
     return;
   }
   runAgentEndSideEffects(sideEffectParams);
+}
+
+export function reportCodexBackgroundCleanupFailure(
+  params: EmbeddedRunAttemptParams,
+  error: unknown,
+): void {
+  const message = formatErrorMessage(error);
+  embeddedAgentLog.warn("codex native background work remains unsettled", {
+    runId: params.runId,
+    sessionId: params.sessionId,
+    error: message,
+  });
+  void emitCodexAppServerEvent(params, {
+    stream: "codex_app_server.lifecycle",
+    data: { phase: "background_cleanup_failed", error: message },
+  });
 }

@@ -71,7 +71,14 @@ export function copyPluginSourceFile(source: string, boundary: string, target: s
         return;
       } catch (error) {
         // Chroots and restricted mounts can lack descriptor paths despite a valid open file.
-        if (!["ENOENT", "ENOTDIR", "EACCES", "EPERM"].some((code) => hasErrnoCode(error, code))) {
+        if (
+          !["ENOENT", "ENOTDIR", "EACCES", "EPERM"].some((code) => hasErrnoCode(error, code)) &&
+          !(
+            process.platform === "darwin" &&
+            Object.hasOwn(process.versions, "bun") &&
+            hasErrnoCode(error, "EBADF")
+          )
+        ) {
           throw error;
         }
       }

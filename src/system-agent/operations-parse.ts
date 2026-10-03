@@ -179,9 +179,7 @@ function normalizeExplicitSystemAgentId(agentId: string): string {
   return normalized.ok ? normalized.value : agentId;
 }
 
-function parseConfigSetCommand(
-  input: string,
-): { path: string; value: string; valid: true } | { valid: false } | undefined {
+function parseConfigSetCommand(input: string): SystemAgentOperation | undefined {
   const prefix = input.match(CONFIG_SET_PREFIX_RE)?.[0];
   if (!prefix) {
     return undefined;
@@ -198,16 +196,16 @@ function parseConfigSetCommand(
       // through to model-visible text while remaining valid config commands.
       parseConfigSetPath(path);
       if (isSystemAgentSensitiveConfigPathEmbedding(path)) {
-        return { valid: false };
+        return { kind: "none", message: INVALID_CONFIG_SET_MESSAGE };
       }
-      return { path, value, valid: true };
+      return { kind: "config-set", path, value };
     } catch {
       continue;
     }
   }
   // Keep malformed writes on the host side so their values never reach the
   // model. This outcome is deliberately non-executable.
-  return body.trim() ? { valid: false } : undefined;
+  return body.trim() ? { kind: "none", message: INVALID_CONFIG_SET_MESSAGE } : undefined;
 }
 
 function parseConfigReadCommand(
@@ -236,16 +234,7 @@ function parseConfigReadCommand(
   return { kind: "none", message: INVALID_CONFIG_SET_MESSAGE };
 }
 
-function parseConfigSetRefCommand(input: string):
-  | {
-      path: string;
-      source: "env" | "file" | "exec" | "store";
-      id: string;
-      provider?: string;
-      valid: true;
-    }
-  | { valid: false }
-  | undefined {
+function parseConfigSetRefCommand(input: string): SystemAgentOperation | undefined {
   const prefix = input.match(CONFIG_SET_REF_PREFIX_RE)?.[0];
   if (!prefix) {
     return undefined;
@@ -260,7 +249,7 @@ function parseConfigSetRefCommand(input: string):
     try {
       parseConfigSetPath(path);
       if (isSystemAgentSensitiveConfigPathEmbedding(path)) {
-        return { valid: false };
+        return { kind: "none", message: INVALID_CONFIG_SET_MESSAGE };
       }
     } catch {
       continue;
@@ -273,17 +262,17 @@ function parseConfigSetRefCommand(input: string):
     const id = args.groups.id.trim();
     const provider = args.groups.provider ?? DEFAULT_SECRET_PROVIDER_ALIAS;
     if (!isValidSecretRef({ source, provider, id })) {
-      return { valid: false };
+      return { kind: "none", message: INVALID_CONFIG_SET_MESSAGE };
     }
     return {
+      kind: "config-set-ref",
       path,
       source,
       id,
       ...(args.groups.provider ? { provider: args.groups.provider } : {}),
-      valid: true,
     };
   }
-  return body.trim() ? { valid: false } : undefined;
+  return body.trim() ? { kind: "none", message: INVALID_CONFIG_SET_MESSAGE } : undefined;
 }
 
 /** Stable name prefix; the secret-store writer allocates a fresh entry for every save. */
@@ -317,28 +306,12 @@ export function parseSystemAgentOperation(input: string): SystemAgentOperation {
     }
   }
   const configSetRef = parseConfigSetRefCommand(trimmed);
-  if (configSetRef?.valid) {
-    return {
-      kind: "config-set-ref",
-      path: configSetRef.path,
-      source: configSetRef.source,
-      id: configSetRef.id,
-      ...(configSetRef.provider ? { provider: configSetRef.provider } : {}),
-    };
-  }
-  if (configSetRef && !configSetRef.valid) {
-    return { kind: "none", message: INVALID_CONFIG_SET_MESSAGE };
+  if (configSetRef) {
+    return configSetRef;
   }
   const configSet = parseConfigSetCommand(trimmed);
   if (configSet) {
-    if (!configSet.valid) {
-      return { kind: "none", message: INVALID_CONFIG_SET_MESSAGE };
-    }
-    return {
-      kind: "config-set",
-      path: configSet.path,
-      value: configSet.value,
-    };
+    return configSet;
   }
   for (const [kind, prefix] of [
     ["config-unset", CONFIG_UNSET_PREFIX_RE],
@@ -535,14 +508,19 @@ export function describeSystemAgentPersistentOperation(operation: SystemAgentOpe
         : `set agents.defaults.model.primary to ${operation.model}`;
     case "config-unset":
       return `remove config ${redactSystemAgentConfigPath(operation.path)}`;
-    case "config-set":
-      return `set config ${redactSystemAgentConfigPath(operation.path)} to ${formatConfigSetValueForPlan(operation.path, operation.value)}`;
+    case "config-set": {
+      const path = redactSystemAgentConfigPath(operation.path);
+      const value = isSystemAgentSensitiveConfigValue(operation.path, operation.value)
+        ? "<redacted>"
+        : operation.value;
+      return `set config ${path} to ${value}`;
+    }
     case "config-set-ref":
       return operation.secret === undefined
         ? `set config ${redactSystemAgentConfigPath(operation.path)} to ${operation.source} SecretRef <redacted>`
         : `save the provided secret in the secret store and point config ${redactSystemAgentConfigPath(operation.path)} at it`;
     case "setup":
-      return formatSetupPlanDescription(operation);
+      return `bootstrap OpenClaw setup for workspace ${shortenHomePath(resolveUserPath(operation.workspace ?? process.cwd()))}`;
     case "model-setup":
       return "configure a model provider and default model";
     case "doctor-fix":
@@ -555,7 +533,7 @@ export function describeSystemAgentPersistentOperation(operation: SystemAgentOpe
       return `uninstall plugin ${operation.pluginId}`;
     case "create-agent":
       return [
-        `create agent ${operation.agentId} with workspace ${formatCreateAgentWorkspace(operation.workspace)}`,
+        `create agent ${operation.agentId} with workspace ${operation.workspace ? shortenHomePath(resolveUserPath(operation.workspace)) : "the default for this agent"}`,
         operation.name ? `name: ${JSON.stringify(operation.name)}` : undefined,
         operation.purpose ? `purpose: ${JSON.stringify(operation.purpose)}` : undefined,
         operation.role
@@ -601,22 +579,4 @@ export function formatSystemAgentPersistentPlan(
   return operatorApprovalOnly
     ? `Proposed: ${description}.\n\n${SYSTEM_AGENT_OPERATOR_APPROVAL_HANDOFF}`
     : `Plan: ${description}. Say yes to apply.`;
-}
-
-function formatCreateAgentWorkspace(workspace: string | undefined): string {
-  return workspace ? shortenHomePath(resolveUserPath(workspace)) : "the default for this agent";
-}
-
-function formatConfigSetValueForPlan(configPath: string, value: string): string {
-  if (isSystemAgentSensitiveConfigValue(configPath, value)) {
-    return "<redacted>";
-  }
-  return value;
-}
-
-function formatSetupPlanDescription(
-  operation: Extract<SystemAgentOperation, { kind: "setup" }>,
-): string {
-  const workspace = shortenHomePath(resolveUserPath(operation.workspace ?? process.cwd()));
-  return `bootstrap OpenClaw setup for workspace ${workspace}`;
 }

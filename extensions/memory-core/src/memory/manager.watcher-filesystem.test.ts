@@ -79,7 +79,7 @@ it("indexes real edits, deletion and root replacement, then joins every subscrip
     await fs.writeFile(note, "Amethyst sentinel.");
     const cfg: OpenClawConfig = {
       plugins: { enabled: false },
-      agents: { defaults: { workspace: state.workspaceDir }, list: [{ id: "main" }] },
+      agents: { defaults: { workspace: state.workspaceDir }, entries: { main: {} } },
       memory: {
         search: {
           provider: "none",
@@ -163,16 +163,6 @@ it("indexes real edits, deletion and root replacement, then joins every subscrip
     expect(contexts.every((context) => context === undefined)).toBe(true);
     await activeManager.close();
     expect(subscriptions.every((entry) => entry.health().state === "closed")).toBe(true);
-    console.info(
-      JSON.stringify({
-        owner: "memory",
-        platform: process.platform,
-        modes: [...new Set(subscriptions.map((entry) => entry.health().mode))],
-        root: "os.tmpdir",
-        invalidation: "guarded-reconcile",
-        proof: ["published-edit", "published-delete", "published-replacement", "joined-close"],
-      }),
-    );
   } finally {
     await manager?.close();
     index?.close();

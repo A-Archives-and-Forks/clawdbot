@@ -17,7 +17,7 @@ import { createOpenAIRealtimeClientSecret } from "./realtime-provider-shared.js"
 import { OpenAIQuicksilverVoiceBridge } from "./realtime-quicksilver-bridge.js";
 import { OpenAIQuicksilverGatewayBridge } from "./realtime-quicksilver-gateway-bridge.js";
 import { buildOpenAIQuicksilverInstructions } from "./realtime-quicksilver-instructions.js";
-import type { createOpenAIQuicksilverBrowserSessionBroker } from "./realtime-quicksilver-session.js";
+import type { OpenAIQuicksilverBrowserSessionBroker } from "./realtime-quicksilver-session.js";
 import {
   OPENAI_QUICKSILVER_CAPABILITIES,
   isOpenAIGptLiveModel,
@@ -46,10 +46,6 @@ import {
   type OpenAIRealtimeVoice,
   type OpenAIRealtimeVoiceProviderConfig,
 } from "./realtime-voice-session-policy.js";
-
-type OpenAIQuicksilverBrowserSessionBroker = ReturnType<
-  typeof createOpenAIQuicksilverBrowserSessionBroker
->["broker"];
 
 const INTERNAL_REALTIME_VOICE_PROVIDER = Symbol.for("openclaw.internal.realtime-voice-provider.v1");
 
@@ -147,6 +143,11 @@ async function createOpenAIRealtimeBrowserSession(
 ): Promise<RealtimeVoiceBrowserSession> {
   const { resolveAgentDir } = context;
   const config = normalizeProviderConfig(req.providerConfig);
+  const authParams = {
+    configuredApiKey: config.apiKey,
+    cfg: req.cfg,
+    agentId: req.agentId,
+  };
   if (config.azureEndpoint || config.azureDeployment) {
     throw new Error("OpenAI Realtime browser sessions do not support Azure endpoints yet");
   }
@@ -162,29 +163,14 @@ async function createOpenAIRealtimeBrowserSession(
       instructions: buildOpenAIQuicksilverInstructions(model, req.instructions),
       voice: req.voice ?? config.voice,
     };
-    const auth = await resolveOpenAIQuicksilverBridgeAuth(
-      {
-        configuredApiKey: config.apiKey,
-        cfg: req.cfg,
-        agentId: req.agentId,
-        model,
-      },
-      context,
-    );
+    const auth = await resolveOpenAIQuicksilverBridgeAuth({ ...authParams, model }, context);
     return await quicksilverBroker.createBrowserSession(quicksilverRequest, auth);
   }
   if (req.gatewayControl) {
     if (!quicksilverBroker) {
       throw new Error("OpenAI realtime browser session broker is unavailable");
     }
-    const auth = await requireOpenAIRealtimePlatformAuth(
-      {
-        configuredApiKey: config.apiKey,
-        cfg: req.cfg,
-        agentId: req.agentId,
-      },
-      context,
-    );
+    const auth = await requireOpenAIRealtimePlatformAuth(authParams, context);
     const voice =
       normalizeOpenAIRealtimeVoice(req.voice) ??
       normalizeOpenAIRealtimeVoice(config.voice) ??
@@ -264,7 +250,7 @@ async function createOpenAIRealtimeBrowserSession(
           },
         },
       },
-      { type: "api-key", token: auth.value },
+      { type: "api-key", token: auth },
     );
   }
   const { session, voice } = buildOpenAIRealtimeBrowserSessionConfig(
@@ -273,25 +259,9 @@ async function createOpenAIRealtimeBrowserSession(
     model,
     context.warn,
   );
-  const auth = await resolveOpenAIRealtimePlatformAuth(
-    {
-      configuredApiKey: config.apiKey,
-      cfg: req.cfg,
-      agentId: req.agentId,
-    },
-    context,
-  );
-  if (auth.status === "missing") {
-    if (
-      hasOpenAIRealtimePlatformAuthInput(
-        {
-          configuredApiKey: config.apiKey,
-          cfg: req.cfg,
-          agentId: req.agentId,
-        },
-        context,
-      )
-    ) {
+  const auth = await resolveOpenAIRealtimePlatformAuth(authParams, context);
+  if (!auth) {
+    if (hasOpenAIRealtimePlatformAuthInput(authParams, context)) {
       throw new Error(OPENAI_REALTIME_PLATFORM_AUTH_REQUIRED);
     }
     const subscriptionAuth = await resolveOpenAIChatGptSubscriptionAuth(
@@ -320,7 +290,7 @@ async function createOpenAIRealtimeBrowserSession(
 
   const clientSecret = await createOpenAIRealtimeClientSecret(
     {
-      authToken: auth.value,
+      authToken: auth,
       auditContext: "openai-realtime-browser-session",
       session,
       authRejectedMessage: OPENAI_REALTIME_CONFIGURED_API_KEY_REJECTED,
@@ -395,47 +365,35 @@ export function buildOpenAIRealtimeVoiceProvider(
             "GPT-Live backend WebSocket sessions do not support Azure endpoints or deployments",
           );
         }
+        const bridgeConfig = {
+          ...req,
+          model,
+          voice: config.voice,
+          instructions: buildOpenAIQuicksilverInstructions(model, req.instructions),
+        };
+        const authParams = {
+          configuredApiKey: config.apiKey,
+          cfg: req.cfg,
+          agentId: req.agentId,
+        };
         if (req.runAgentConsult) {
           return new OpenAIQuicksilverGatewayBridge(
             {
-              ...req,
-              model,
-              voice: config.voice,
-              instructions: buildOpenAIQuicksilverInstructions(model, req.instructions),
+              ...bridgeConfig,
               logger: options?.logger ?? { debug: () => undefined, warn: () => undefined },
               resolveAuth: () =>
-                resolveOpenAIQuicksilverBridgeAuth(
-                  {
-                    configuredApiKey: config.apiKey,
-                    cfg: req.cfg,
-                    agentId: req.agentId,
-                    model,
-                  },
-                  context,
-                ),
+                resolveOpenAIQuicksilverBridgeAuth({ ...authParams, model }, context),
             },
             context,
           );
         }
         return new OpenAIQuicksilverVoiceBridge(
           {
-            ...req,
-            model,
-            voice: config.voice,
-            instructions: buildOpenAIQuicksilverInstructions(model, req.instructions),
+            ...bridgeConfig,
             logger: options?.logger ?? { warn: () => undefined },
             resolveAuth: async () => ({
               type: "api-key",
-              token: (
-                await requireOpenAIRealtimePlatformAuth(
-                  {
-                    configuredApiKey: config.apiKey,
-                    cfg: req.cfg,
-                    agentId: req.agentId,
-                  },
-                  context,
-                )
-              ).value,
+              token: await requireOpenAIRealtimePlatformAuth(authParams, context),
             }),
           },
           context,

@@ -68,6 +68,13 @@ Keep images embedded and video URLs on their own lines for GitHub playback.
 Feature-detect format/size support rather than assuming a particular CLI release.
 Do not disclose private desktop content, identifiers, model routes, or secrets.
 
+## Red main and inherited failures
+
+- **Red `main` is an emergency, not a queue item.** When CI on `main` is red, fix it in a fresh worktree, prove it with the exact failing check plus the focused tests (locally or on a Testbox), and push that exact fix directly to `main` — no PR, no auto-merge wait — so every open PR unblocks at once. This applies to deterministic breaks and to flaky tests seen red on `main` alike; open a PR only if the direct push is refused by a ruleset, and say so. Reruns do not clear a red `main`, and PRs whose merge ref went red need a fresh push after the fix lands.
+- Pushes to `main` run only `security-fast`; full `main` CI runs hourly.
+- **CI is expensive; do not spend it on proof.** Prove changes with focused local runs (Crabbox/Testbox for suites too heavy for the host) and trust those results. Do not dispatch workflow runs, rerun jobs, re-push, or update branches just to obtain or confirm green. Breaking `main` is an acceptable cost; fix it forward.
+- **Pre-existing reds do not block landing.** A PR whose only failing checks also fail on current `main` (same test, in files the PR does not touch) may land through the native landing workflow's admin exception; name the inherited failure in the PR. A tiny PR-caused failure (lint, types, a stale test expectation) may land the same way only if the lander pushes the fix to `main` immediately afterward. Anything larger stays blocked.
+
 ## Review, prepare, merge
 
 For main-targeted PRs, prefer the native sequence; adapt as needed.
@@ -90,6 +97,18 @@ nit sweep is required. Templates describe unfinished work with valid enum values
 FOR /prepare-pr`. After every push, rerun `review-init`; checkout alone does not
 refresh the guard. Validate from PR-head mode. Do not fabricate passing evidence
 or erase a failing review condition.
+
+After the [test-failure investigation](../../openclaw-testing/SKILL.md#test-failure-policy),
+a local failure whose cause or safe fix remains unresolved can retain
+`tests.result: "fail"` with `tests.investigatedLocalFailures`. Bind `head` to the
+exact reviewed SHA and record every original `failure`, actual
+`reproductionAttempts`, `evidence`, and `remainingUncertainty` in its nonempty
+`failures` array. Attempts and evidence are nonempty string arrays; failure and
+uncertainty are nonempty strings. Keep that evidence in the PR and never claim a
+passing replay proves a fix. The structured disposition permits READY review
+under the existing policy; it does not waive substantive findings, behavioral
+review, required CI, security, or enforced reviews. Failed CI still uses its
+separate admission policy below.
 
 Select one gate mode per invocation; older shells or installed instructions may
 still set `OPENCLAW_TESTBOX=1`. The command above clears it only for that process.
@@ -239,6 +258,16 @@ list. Matrix cancellation names it only when it is an inspected causal member.
 Extra failed steps, absent or changed qualification, and mismatched sources refuse
 admission. This does not qualify the underlying test failure by itself.
 
+The same failure entry can bind a cancelled `check-prod-types` job with
+`failedStep: { number: 16, workflowJob: "check-shard" }`, using the actual step
+number. This route recognizes only the audited `Run check shard` command and its
+task/matrix bindings. Every declared workflow step must appear at its source
+position; all step timestamps must be ordered within the job and cleanup must
+succeed. The retained proof includes the full steps and cancelled conclusion.
+Matrix membership and the underlying type failure still require independent
+inspection. The same source, security, review, and exhaustive cancellation gates
+apply.
+
 An explicitly attributed Node job that exhausted its execution deadline may appear
 as `cancelled` in GitHub's job API. Keep it in `failures`, with the actual observed
 cases and incomplete coverage recorded. The verifier requires the matching live
@@ -257,8 +286,17 @@ ordered terminal steps, the expected shard ordinal, bounded timestamps reaching
 the deadline, successful cleanup, and no other failed or cancelled step. Preserve
 any unfinished receipt or canary coverage in its independent failure attribution.
 
-For the existing Node matrix's native fail-fast (including fork PRs whose monitor
-is skipped), use `cancellation.kind: "matrix-fail-fast"` and
+Current `openclaw/openclaw` PR reruns do not use native matrix fail-fast: every
+Node matrix leg can finish, preserving the remaining proof for inherited-red admin
+landing. This also applies to fork PRs targeting `openclaw/openclaw`; the workflow
+repository, not the head repository, owns this policy. The first-attempt monitor
+is unchanged. Native matrix fail-fast remains enabled only for PRs running in
+other repositories.
+
+Historical runs still use their tested workflow's policy, including the former
+expression that enabled native fail-fast on canonical PR reruns. For a run whose
+tested workflow and attempt/repository context enable native fail-fast, use
+`cancellation.kind: "matrix-fail-fast"` and
 `workflowJob: "checks-node-core-test-nondist-shard"` instead of monitor `jobId`/`step`.
 Its `causedBy` must name a nonempty, unique subset of independently admitted
 failed roots that actually caused this matrix cancellation. Add `members`, the
@@ -301,9 +339,11 @@ the current effective GitHub Actions gate check-run, and source/artifact hashes.
 During active prior-CI admission, unrelated main movement can pass when it is
 forward from both captured main anchors and produces a conflict-free, nonempty
 merge. Exact PR/policy facts and final live authority checks still apply; the
-intent and landing-parent audit retain their original main anchor. The last
-reread uses local objects only, so a newly unavailable main is a pre-dispatch
-refusal, not permission to fetch after authority verification. Crabbox admission
+intent and landing-parent audit retain their original main anchor. Already-selected
+REST completes its final observation and main materialization before one final
+live authority verification. GraphQL retains its post-authority local-only reread,
+including late REST fallback; a newly unavailable main there is a pre-dispatch
+refusal. Neither path fetches after final authority verification. Crabbox admission
 and retained-outcome reconciliation keep their existing strict main binding.
 A fork run with an empty GitHub PR association must match the current PR's exact
 head, branch, and source repository identity as well as that check-run; an
@@ -428,6 +468,23 @@ recovery are outside this exception. Another explicit recovery must use the new
 outcome OID and independently qualify its response; there is no automatic retry.
 If the PR has merged meanwhile, reconcile the retained outcome without sending
 another merge request.
+
+When an unaccepted prior-CI REST admin request is uncertain, a different current
+head fences its exact `sha`. After fresh review and exact-head `github_pending`
+preparation, retire it into an ordinary current-head auto request:
+
+```bash
+scripts/pr merge-recover <PR> <OUTCOME_OID> --confirmed-operator-recovery \
+  --replacement-head <HEAD_SHA> --auto-merge
+```
+
+Do not pass `--admin-evidence`. The replacement must differ, and the PR must stay
+OPEN and `MERGEABLE/BLOCKED` or `MERGEABLE/BEHIND`. Normal required-check,
+ClawSweeper, review, security, and owner gates still apply. The successor CAS
+records route `auto` plus `recovery.staleHeadRetirement`, preserving ancestry
+and exact regular capture bytes without interpreting them; an empty capture is
+valid. Missing, symlink, extra, or admission-mutated captures, same-head or
+stale evidence, lifecycle/head drift, queue state, and failed gates stay blocked.
 
 After two identical pre-dispatch failures without new evidence, stop invoking
 the same blocked route. Inspect the failure and select an already-authorized

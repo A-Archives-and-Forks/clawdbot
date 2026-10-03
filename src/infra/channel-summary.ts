@@ -1,4 +1,3 @@
-// Formats channel account summaries for CLI status surfaces.
 import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import { sanitizeForLog } from "../../packages/terminal-core/src/ansi.js";
 import { theme } from "../../packages/terminal-core/src/theme.js";
@@ -9,7 +8,7 @@ import {
 import { hasConfiguredUnavailableCredentialStatus } from "../channels/account-snapshot-fields.js";
 import { formatChannelAllowFrom } from "../channels/account-summary.js";
 import { formatChannelStatusState } from "../channels/plugins/status-state.js";
-import type { ChannelPlugin } from "../channels/plugins/types.plugin.js";
+import type { AnyChannelPlugin as ChannelPlugin } from "../channels/plugins/types.plugin.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { DEFAULT_ACCOUNT_ID } from "../routing/session-key.js";
 import { formatTimeAgo } from "./format-time/format-relative.ts";

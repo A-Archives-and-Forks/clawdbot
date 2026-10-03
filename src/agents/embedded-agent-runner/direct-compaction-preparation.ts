@@ -39,7 +39,10 @@ import {
 import { log } from "./logger.js";
 import { resolveTieredModel } from "./model-resolution.js";
 import { resolveModelAsync } from "./model.js";
-import type { TranscriptByteCompactionPersistence } from "./transcript-byte-preflight-authority.js";
+import type {
+  TranscriptByteCompactionPersistence,
+  TranscriptByteCompactionPersistenceAsync,
+} from "./transcript-byte-preflight-authority.js";
 import type { EmbeddedAgentCompactResult } from "./types.js";
 
 export type PreparedCompactEmbeddedAgentSessionParams = CompactEmbeddedAgentSessionRuntimeParams & {
@@ -48,6 +51,7 @@ export type PreparedCompactEmbeddedAgentSessionParams = CompactEmbeddedAgentSess
   requestedRouteResolution?: "resolved";
   transcriptBytePreflightAuthority?: true;
   transcriptByteCompactionPersistence?: TranscriptByteCompactionPersistence;
+  transcriptByteCompactionPersistenceAsync?: TranscriptByteCompactionPersistenceAsync;
   sandbox?: SandboxContext | null;
 };
 
@@ -183,8 +187,9 @@ export async function prepareDirectCompactionAttempt(
     providerUsesProfileScopedModelMetadata,
   } = harnessAuth;
   const preparedHarnessRuntime = selectedPreparedHarness.id;
-  const resolveRuntimeAuthAttempt = () =>
-    resolvePreparedRuntimeAuthAttempts({
+  let resolvedAuthAttempt;
+  try {
+    resolvedAuthAttempt = await resolvePreparedRuntimeAuthAttempts({
       attempts: runtimeAuthPreparation.attempts,
       store: runtimeAuthProfileStore,
       modelId,
@@ -227,9 +232,6 @@ export async function prepareDirectCompactionAttempt(
         }),
       errorMessage: `Prepared compaction auth attempts could not be resolved for ${provider}/${modelId}.`,
     });
-  let resolvedAuthAttempt: Awaited<ReturnType<typeof resolveRuntimeAuthAttempt>>;
-  try {
-    resolvedAuthAttempt = await resolveRuntimeAuthAttempt();
     params.abortSignal?.throwIfAborted();
   } catch (err) {
     return { ok: false as const, result: fail(formatErrorMessage(err), err) };

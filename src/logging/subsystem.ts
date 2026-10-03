@@ -39,19 +39,9 @@ export type SubsystemLogger = {
 type ChalkInstance = InstanceType<typeof Chalk>;
 
 const inspectValue: ((value: unknown) => string) | null = (() => {
-  const getBuiltinModule = (
-    process as NodeJS.Process & {
-      getBuiltinModule?: (id: string) => unknown;
-    }
-  ).getBuiltinModule;
-  if (typeof getBuiltinModule !== "function") {
-    return null;
-  }
   try {
-    const utilNamespace = getBuiltinModule("util") as {
-      inspect?: (value: unknown) => string;
-    };
-    return typeof utilNamespace.inspect === "function" ? utilNamespace.inspect : null;
+    const inspect = process.getBuiltinModule?.("util").inspect;
+    return typeof inspect === "function" ? inspect : null;
   } catch {
     return null;
   }
@@ -99,7 +89,7 @@ const SUBSYSTEM_COLORS = ["cyan", "green", "yellow", "blue", "magenta", "red"] a
 const SUBSYSTEM_COLOR_OVERRIDES = new Map<string, (typeof SUBSYSTEM_COLORS)[number]>([
   ["gmail-watcher", "blue"],
 ]);
-const SUBSYSTEM_PREFIXES_TO_DROP = ["gateway", "channels", "providers"] as const;
+const SUBSYSTEM_PREFIXES_TO_DROP = new Set(["gateway", "channels", "providers"]);
 const SUBSYSTEM_MAX_SEGMENTS = 2;
 const CHANNEL_SUBSYSTEM_PREFIXES = new Set([
   "clickclack",
@@ -146,14 +136,7 @@ function pickSubsystemColor(subsystem: string): (typeof SUBSYSTEM_COLORS)[number
 function formatSubsystemForConsole(subsystem: string): string {
   const parts = subsystem.split("/").filter(Boolean);
   const original = parts.join("/") || subsystem;
-  while (parts.length > 0) {
-    const first = parts.at(0);
-    if (
-      first === undefined ||
-      !SUBSYSTEM_PREFIXES_TO_DROP.includes(first as (typeof SUBSYSTEM_PREFIXES_TO_DROP)[number])
-    ) {
-      break;
-    }
+  while (parts[0] !== undefined && SUBSYSTEM_PREFIXES_TO_DROP.has(parts[0])) {
     parts.shift();
   }
   const first = parts.at(0);
@@ -169,7 +152,7 @@ function formatSubsystemForConsole(subsystem: string): string {
   return parts.join("/");
 }
 
-export function stripRedundantSubsystemPrefixForConsole(
+function stripRedundantSubsystemPrefixForConsole(
   message: string,
   displaySubsystem: string,
 ): string {

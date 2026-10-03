@@ -1,5 +1,3 @@
-import { normalizeOptionalLowercaseString } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { parseQaTarget } from "./qa-bus-protocol.js";
 import type {
   QaBusAttachment,
   QaBusConversation,
@@ -13,7 +11,9 @@ import type {
   QaBusStateSnapshot,
   QaBusThread,
   QaBusToolCall,
-} from "./runtime-api.js";
+} from "openclaw/plugin-sdk/qa-channel-protocol";
+import { normalizeOptionalLowercaseString } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { parseQaTarget } from "./qa-bus-protocol.js";
 
 const DEFAULT_ACCOUNT_ID = "default";
 
@@ -119,21 +119,16 @@ export function searchQaBusMessages(params: {
   const limit = Math.max(1, Math.min(params.input.limit ?? 20, 100));
   const query = normalizeOptionalLowercaseString(params.input.query);
   return Array.from(params.messages.values())
-    .filter((message) => message.accountId === accountId && !message.deleted)
-    .filter((message) =>
-      params.input.conversationId !== undefined
-        ? message.conversation.id === params.input.conversationId
-        : true,
-    )
-    .filter((message) =>
-      params.input.conversationKind
-        ? message.conversation.kind === params.input.conversationKind
-        : true,
-    )
-    .filter((message) =>
-      params.input.threadId !== undefined
-        ? (message.threadId ?? null) === params.input.threadId
-        : true,
+    .filter(
+      (message) =>
+        message.accountId === accountId &&
+        !message.deleted &&
+        (params.input.conversationId === undefined ||
+          message.conversation.id === params.input.conversationId) &&
+        (!params.input.conversationKind ||
+          message.conversation.kind === params.input.conversationKind) &&
+        (params.input.threadId === undefined ||
+          (message.threadId ?? null) === params.input.threadId),
     )
     .filter((message) => {
       if (!query) {

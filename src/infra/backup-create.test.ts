@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import fsSync from "node:fs";
+import fsSync, { rmSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -42,6 +42,7 @@ import {
 } from "./backup-create.test-support.js";
 import { classifyBackupSqliteSource } from "./backup-sqlite-snapshot.js";
 import { writeTarArchiveWithRetry } from "./backup-tar-retry.js";
+import * as backupTarWalk from "./backup-tar-walk.js";
 import { acquireGatewayLock } from "./gateway-lock.js";
 import { requireNodeSqlite } from "./node-sqlite.js";
 
@@ -488,6 +489,46 @@ describe("writeTarArchiveWithRetry", () => {
   });
 });
 
+describe("volatile archive traversal", () => {
+  it("filters a volatile file removed after directory discovery", async () => {
+    await withBackupState("openclaw-backup-volatile-traversal-", async (state) => {
+      const volatilePath = await state.writeText("logs/gateway.log", "live log\n");
+      await state.writeText("settings.json", '{"keep":true}\n');
+      const readdir = fs.readdir;
+      const walk = backupTarWalk.walkBackupTar;
+      let archiving = false;
+      let removedBeforeStat = false;
+      const traversal = vi.spyOn(backupTarWalk, "walkBackupTar").mockImplementation((params) => {
+        archiving = true;
+        return walk(params);
+      });
+      const discovery = vi.spyOn(fs, "readdir").mockImplementation(async (...args) => {
+        const entries = await readdir(...args);
+        // Earlier discovery also lists logs; remove only after the payload walker lists its name.
+        if (archiving && args[0] === path.dirname(volatilePath)) {
+          rmSync(volatilePath, { force: true });
+          removedBeforeStat = true;
+        }
+        return entries;
+      });
+      try {
+        const archive = await createBackupArchive({
+          output: state.path("backup.tar.gz"),
+          includeWorkspace: false,
+        });
+        const entries = await listArchiveEntries(archive.archivePath);
+        expect(removedBeforeStat).toBe(true);
+        expect(archive.skippedVolatileCount).toBe(1);
+        expect(entries.some((entry) => entry.endsWith("/settings.json"))).toBe(true);
+        expect(entries.some((entry) => entry.endsWith("/logs/gateway.log"))).toBe(false);
+      } finally {
+        discovery.mockRestore();
+        traversal.mockRestore();
+      }
+    });
+  });
+});
+
 describe("backup SQLite AppleDouble classification", () => {
   it("excludes genuine AppleDouble metadata without treating it as SQLite", async () => {
     await withBackupClassificationDir(async (dir) => {
@@ -628,7 +669,7 @@ describe("createBackupArchive", () => {
   it("excludes AppleDouble metadata only from SQLite-owned roots", async () => {
     await withOpenClawTestState({ layout: "state-only", scenario: "minimal" }, async (state) => {
       await state.writeConfig({
-        agents: { entries: { main: { default: true, workspace: state.workspaceDir } } },
+        agents: { entries: { main: { workspace: state.workspaceDir } } },
       });
       const metadata = Buffer.alloc(163);
       APPLE_DOUBLE_MAGIC.copy(metadata);
@@ -1059,7 +1100,7 @@ describe("createBackupArchive", () => {
       await fs.writeFile(path.join(pluginSkillsDir, "generated-skill.md"), "generated\n", "utf8");
       await state.writeConfig({
         agents: {
-          entries: { main: { default: true, agentDir } },
+          entries: { main: { agentDir } },
         },
       });
 
@@ -1129,7 +1170,6 @@ describe("createBackupArchive", () => {
           agents: {
             entries: {
               main: {
-                default: true,
                 agentDir,
                 ...(includeWorkspace ? { workspace: state.workspaceDir } : {}),
               },
@@ -1211,7 +1251,7 @@ describe("createBackupArchive", () => {
       const agentDir = state.path("sidecar-agent");
       await fs.mkdir(agentDir, { recursive: true });
       await state.writeConfig({
-        agents: { entries: { main: { default: true, agentDir } } },
+        agents: { entries: { main: { agentDir } } },
       });
       const dbPath = path.join(agentDir, "openclaw-agent.sqlite");
       createOwnedSqliteDatabase({ sqlitePath: dbPath, role: "agent", agentId: "main" });
@@ -1255,7 +1295,7 @@ describe("createBackupArchive", () => {
     await withBackupState("openclaw-backup-external-agent-owner-", async (state) => {
       const agentDir = state.path("external-agent");
       await fs.mkdir(agentDir, { recursive: true });
-      await state.writeConfig({ agents: { entries: { main: { default: true, agentDir } } } });
+      await state.writeConfig({ agents: { entries: { main: { agentDir } } } });
       registerAgentDatabase(state, path.join(agentDir, "openclaw-agent.sqlite"));
       createOwnedSqliteDatabase({
         sqlitePath: path.join(agentDir, "openclaw-agent.sqlite"),
@@ -1336,7 +1376,7 @@ describe("createBackupArchive", () => {
           await fs.symlink("/outside-backup", path.join(excludedAgentRoot, "unsafe-link"));
         }
         await state.writeConfig({
-          agents: { entries: { main: { default: true, agentDir } } },
+          agents: { entries: { main: { agentDir } } },
           plugins: {
             load: { paths: [pluginRoot] },
             entries: { "backup-owner": { enabled: true } },
@@ -1498,7 +1538,7 @@ describe("createBackupArchive", () => {
         const outputDir = state.path("backups");
         await state.writeConfig({
           agents: {
-            entries: { main: { default: true, workspace: state.workspaceDir } },
+            entries: { main: { workspace: state.workspaceDir } },
           },
         });
         await fs.mkdir(outputDir, { recursive: true });
@@ -3145,7 +3185,7 @@ describe("createBackupArchive", () => {
       const hardlinkedDbPath = state.statePath("state", "._hardlinked-global.sqlite");
       await state.writeConfig({
         agents: {
-          entries: { main: { default: true, workspace: state.workspaceDir } },
+          entries: { main: { workspace: state.workspaceDir } },
         },
       });
       await fs.mkdir(path.dirname(linkedDbPath), { recursive: true });
@@ -3581,8 +3621,9 @@ describe("createBackupArchive", () => {
           configPath,
           `${JSON.stringify({
             agents: {
+              defaults: { systemAgent: { agentId: "main" } },
               entries: {
-                main: { default: true, workspace: workspaceDir },
+                main: { workspace: workspaceDir },
                 external: { workspace: externalTmpWorkspaceDir },
                 worker: { workspace: tmpWorkspaceDir },
                 nested: { workspace: agentTmpWorkspaceDir },
